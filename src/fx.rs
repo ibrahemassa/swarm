@@ -7,19 +7,37 @@ use ratatui::style::Color;
 
 pub const SPINNER: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 pub const STAR: &[&str] = &["·", "✢", "✳", "✶", "✻", "✽", "✻", "✶", "✳", "✢"];
-pub const GLYPHS: &[char] = &[
-    '!', '<', '>', '-', '_', '\\', '/', '[', ']', '{', '}', '=', '+', '*', '^', '?', '#', '░', '▒', '▓',
-    'ｱ', 'ｶ', 'ﾀ', 'ﾅ', '0', '1',
-];
+pub const GLYPHS: &[char] =
+    &['!', '<', '>', '-', '_', '\\', '/', '[', ']', '{', '}', '=', '+', '*', '^', '?', '#', '░', '▒', '▓', 'ｱ', 'ｶ', 'ﾀ', 'ﾅ', '0', '1'];
 pub const RAIN: &[char] = &[
-    'ｱ', 'ｲ', 'ｳ', 'ｴ', 'ｵ', 'ｶ', 'ｷ', 'ｸ', 'ｹ', 'ｺ', 'ｻ', 'ｼ', 'ｽ', 'ｾ', 'ｿ', 'ﾀ', 'ﾁ', 'ﾂ', 'ﾃ', 'ﾄ',
-    '0', '1', '<', '>', '/', '=', '{', '}',
+    'ｱ', 'ｲ', 'ｳ', 'ｴ', 'ｵ', 'ｶ', 'ｷ', 'ｸ', 'ｹ', 'ｺ', 'ｻ', 'ｼ', 'ｽ', 'ｾ', 'ｿ', 'ﾀ', 'ﾁ', 'ﾂ', 'ﾃ', 'ﾄ', '0', '1', '<', '>', '/', '=', '{',
+    '}',
 ];
 pub const VERBS: &[&str] = &[
-    "Vibing", "Transmuting", "Synthesizing", "Conjuring", "Percolating", "Noodling", "Hyperfocusing",
-    "Reticulating", "Cooking", "Manifesting", "Wrangling pixels", "Overclocking", "Flexboxing",
-    "Gradienting", "Tokenmaxxing", "Speedrunning", "Locking in", "Grinding", "Kerning", "Shipping",
-    "Compiling vibes", "Bending CSS", "Summoning divs", "Juggling z-indexes",
+    "Vibing",
+    "Transmuting",
+    "Synthesizing",
+    "Conjuring",
+    "Percolating",
+    "Noodling",
+    "Hyperfocusing",
+    "Reticulating",
+    "Cooking",
+    "Manifesting",
+    "Wrangling pixels",
+    "Overclocking",
+    "Flexboxing",
+    "Gradienting",
+    "Tokenmaxxing",
+    "Speedrunning",
+    "Locking in",
+    "Grinding",
+    "Kerning",
+    "Shipping",
+    "Compiling vibes",
+    "Bending CSS",
+    "Summoning divs",
+    "Juggling z-indexes",
 ];
 
 /// xorshift64*: plenty random for sparkles.
@@ -31,10 +49,7 @@ impl Rng {
     }
 
     pub fn seeded() -> Self {
-        let n = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_nanos() as u64)
-            .unwrap_or(7);
+        let n = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_nanos() as u64).unwrap_or(7);
         Rng::new(n)
     }
 

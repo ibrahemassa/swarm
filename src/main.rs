@@ -1,24 +1,36 @@
+// auto-deref suggestions break inference on rng.pick(); demo helpers take many knobs on purpose
+#![allow(clippy::explicit_auto_deref, clippy::too_many_arguments, clippy::needless_range_loop)]
+
 mod app;
 mod demo;
 mod fx;
 mod orchestrator;
 mod providers;
+mod server;
+mod session;
+mod setup;
 mod ui;
 
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use clap::Parser;
-use ratatui::crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
+use ratatui::crossterm::event::{self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyEventKind};
+use ratatui::crossterm::execute;
+use ratatui::DefaultTerminal;
 
-use app::App;
+use app::{App, Launch};
+use orchestrator::{Config, State};
+use providers::{AgentSpec, Provider};
+use setup::{Choice, Open};
 
-/// Run a swarm of Claude Code / Codex / Antigravity agents that build a web page together,
-/// on a dashboard that looks unreasonably busy.
+/// Run a swarm of Claude Code / Codex / Antigravity agents that build a web page together and
+/// keep taking orders, on a dashboard that looks unreasonably busy. Run with no arguments for the
+/// launcher.
 #[derive(Parser, Debug, Clone)]
 #[command(name = "swarm", version)]
 pub struct Args {
-    /// What to build, e.g. "landing page for a neon ramen bar"
+    /// What to build, e.g. "landing page for a neon ramen bar". Leave out to open the launcher.
     pub task: Option<String>,
     /// Number of Claude Code workers
     #[arg(long, default_value_t = 4)]
@@ -41,19 +53,25 @@ pub struct Args {
     /// Who leads the swarm: claude, agy or codex
     #[arg(long, default_value = "claude")]
     pub lead: String,
-    /// Model for a Claude lead
-    #[arg(long, default_value = "opus")]
-    pub lead_model: String,
-    /// Output folder (default: ./swarm-<task-slug>)
+    /// Model for the lead (default: opus for claude, the family default otherwise)
+    #[arg(long)]
+    pub lead_model: Option<String>,
+    /// Project folder (default: ./swarm-<task-slug>). Without a task: resume the project in it.
     #[arg(long, short)]
     pub out: Option<PathBuf>,
-    /// Skip the lead's final review pass
+    /// Resume the project in --out, the current folder, or the most recent one
+    #[arg(long, short = 'c')]
+    pub resume: bool,
+    /// Spending cap for this session in USD (Claude-reported cost; 0 = none)
+    #[arg(long, default_value_t = 0.0)]
+    pub budget: f64,
+    /// Skip the lead's review pass after the first build
     #[arg(long)]
     pub no_review: bool,
-    /// Open the page right away and auto-refresh it while the agents build
+    /// Open the live preview right away and watch the page build
     #[arg(long)]
     pub live: bool,
-    /// Don't open the finished page in the browser
+    /// Don't open the page in the browser when it ships
     #[arg(long)]
     pub no_open: bool,
     /// Scripted agents, real animations, zero tokens
@@ -61,38 +79,173 @@ pub struct Args {
     pub demo: bool,
 }
 
+/// Everything the dashboard needs to start, from flags, the launcher, or a saved project.
+struct Start {
+    task: String,
+    dir: PathBuf,
+    roster: Vec<AgentSpec>,
+    review: bool,
+    live: bool,
+    auto_open: bool,
+    demo: bool,
+    budget: f64,
+    relief_model: String,
+    resume: Option<State>,
+}
+
+fn from_args(a: &Args, task: String) -> std::io::Result<Start> {
+    let lead_p = Provider::parse(&a.lead).unwrap_or(Provider::Claude);
+    let lead_model =
+        a.lead_model.clone().unwrap_or_else(|| if lead_p == Provider::Claude { "opus".into() } else { lead_p.models().remove(0) });
+    let codex_n = a.codex.unwrap_or(if orchestrator::codex_ready() { 1 } else { 0 });
+    let mut roster = vec![AgentSpec { name: orchestrator::name_word(lead_p, &lead_model), provider: lead_p, model: lead_model }];
+    for (p, n, m) in
+        [(Provider::Claude, a.claude, &a.model), (Provider::Agy, a.agy, &a.agy_model), (Provider::Codex, codex_n, &a.codex_model)]
+    {
+        let word = orchestrator::name_word(p, m);
+        for k in 1..=n {
+            roster.push(AgentSpec { name: format!("{word}-{k}"), provider: p, model: m.clone() });
+        }
+    }
+    let dir = a.out.clone().unwrap_or_else(|| orchestrator::default_dir(&task));
+    let dir = orchestrator::prepare_dir(&dir, true)?;
+    Ok(Start {
+        task,
+        dir,
+        roster,
+        review: !a.no_review,
+        live: a.live,
+        auto_open: !a.no_open && !a.live,
+        demo: a.demo,
+        budget: a.budget,
+        relief_model: a.model.clone(),
+        resume: None,
+    })
+}
+
+fn from_setup(s: setup::Setup) -> std::io::Result<Start> {
+    setup::save_prefs(&s);
+    let dir = orchestrator::prepare_dir(&s.dir_path(), true)?;
+    Ok(Start {
+        task: s.task.trim().to_string(),
+        roster: s.roster(),
+        review: s.review,
+        live: s.open == Open::Live,
+        auto_open: s.open == Open::End,
+        demo: s.demo,
+        budget: s.budget,
+        relief_model: if s.model(Provider::Claude).is_empty() { "sonnet".into() } else { s.model(Provider::Claude).to_string() },
+        resume: None,
+        dir,
+    })
+}
+
+fn from_saved(dir: PathBuf, a: &Args) -> std::io::Result<Option<Start>> {
+    let dir = orchestrator::prepare_dir(&dir, false)?;
+    let Some(st) = State::load(&dir) else { return Ok(None) };
+    Ok(Some(Start {
+        task: st.task.clone(),
+        roster: st.agents.iter().map(|a| a.spec.clone()).collect(),
+        review: st.review,
+        live: false,
+        auto_open: false,
+        demo: false,
+        budget: a.budget,
+        relief_model: a.model.clone(),
+        dir,
+        resume: Some(st),
+    }))
+}
+
+/// Decide what to run: flags first, then a saved project, then the launcher.
+fn choose(a: &Args, term: &mut DefaultTerminal) -> std::io::Result<Option<Start>> {
+    if let Some(t) = &a.task {
+        return from_args(a, t.clone()).map(Some);
+    }
+    if a.demo {
+        return from_args(a, demo::TASK.to_string()).map(Some);
+    }
+    if a.resume || a.out.is_some() {
+        let cwd = std::env::current_dir().ok().filter(|d| State::path(d).exists());
+        let dir = a.out.clone().or(cwd).or_else(setup::latest_project);
+        if let Some(d) = dir {
+            if let Some(s) = from_saved(d.clone(), a)? {
+                return Ok(Some(s));
+            }
+        }
+    }
+    let mut initial = setup::load_prefs();
+    if a.budget > 0.0 {
+        initial.budget = a.budget;
+    }
+    loop {
+        match setup::run(term, initial.clone())? {
+            Choice::Quit => return Ok(None),
+            Choice::Launch(s) => return from_setup(s).map(Some),
+            Choice::Resume(d) => {
+                if let Some(s) = from_saved(d, a)? {
+                    return Ok(Some(s));
+                }
+            }
+        }
+    }
+}
+
 fn main() -> std::io::Result<()> {
     let args = Args::parse();
-    let task = match (&args.task, args.demo) {
-        (Some(t), _) => t.clone(),
-        (None, true) => demo::TASK.to_string(),
-        (None, false) => {
-            eprintln!("usage: swarm \"what to build\"     (or: swarm --demo)");
-            std::process::exit(2);
+    let mut terminal = ratatui::init();
+    let _ = execute!(std::io::stdout(), EnableBracketedPaste);
+    let result = run(&args, &mut terminal);
+    let _ = execute!(std::io::stdout(), DisableBracketedPaste);
+    ratatui::restore();
+    match result {
+        Ok(Some(summary)) => println!("{summary}"),
+        Ok(None) => {}
+        Err(e) => {
+            eprintln!("swarm: {e}");
+            std::process::exit(1);
         }
-    };
-    let dir = orchestrator::prepare_dir(args.out.clone(), &task)?;
-    let roster = orchestrator::roster(&args);
-    let preflight = orchestrator::preflight(&roster, &dir, args.demo);
+    }
+    Ok(())
+}
+
+fn run(args: &Args, terminal: &mut DefaultTerminal) -> std::io::Result<Option<String>> {
+    let Some(start) = choose(args, terminal)? else { return Ok(None) };
+    if !start.demo {
+        setup::remember(&start.dir);
+    }
+    let preflight = orchestrator::preflight(&start.roster, &start.dir, start.demo);
 
     let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-    let cfg = orchestrator::Config {
-        task: task.clone(),
-        dir: dir.clone(),
-        roster: roster.clone(),
-        review: !args.no_review,
-        live: args.live,
-        relief_model: args.model.clone(),
+    let (cmd_tx, cmd_rx) = tokio::sync::mpsc::unbounded_channel();
+    let cfg = Config {
+        task: start.task.clone(),
+        dir: start.dir.clone(),
+        roster: start.roster.clone(),
+        review: start.review,
+        live: start.live,
+        relief_model: start.relief_model.clone(),
+        resume: start.resume.clone(),
     };
-    if args.demo {
-        rt.spawn(demo::run(cfg, tx));
+    if start.demo {
+        rt.spawn(demo::run(cfg, tx, cmd_rx));
     } else {
-        rt.spawn(orchestrator::run(cfg, tx));
+        rt.spawn(orchestrator::run(cfg, tx, cmd_rx));
     }
 
-    let mut app = App::new(task, dir, roster, preflight, args.demo, !args.no_open);
-    let mut terminal = ratatui::init();
+    let mut app = App::new(
+        Launch {
+            task: start.task,
+            dir: start.dir,
+            roster: start.roster,
+            preflight,
+            demo: start.demo,
+            auto_open: start.auto_open,
+            budget: start.budget,
+        },
+        cmd_tx,
+    );
     let frame = Duration::from_millis(33);
     let result = (|| -> std::io::Result<()> {
         loop {
@@ -103,26 +256,21 @@ fn main() -> std::io::Result<()> {
             app.tick();
             terminal.draw(|f| ui::draw(f, &mut app))?;
             if event::poll(frame.saturating_sub(started.elapsed()))? {
-                if let Event::Key(k) = event::read()? {
-                    if k.kind != KeyEventKind::Press {
-                        continue;
+                match event::read()? {
+                    Event::Key(k) if k.kind == KeyEventKind::Press => {
+                        if app.key(k) {
+                            break;
+                        }
                     }
-                    match k.code {
-                        KeyCode::Char('q') | KeyCode::Esc => break,
-                        KeyCode::Char('c') if k.modifiers.contains(KeyModifiers::CONTROL) => break,
-                        KeyCode::Char('o') => app.open_page(),
-                        KeyCode::Char('f') => app.fx = !app.fx,
-                        _ => app.skip_boot(),
-                    }
+                    Event::Paste(s) => app.insert(&s),
+                    _ => {}
                 }
             }
         }
         Ok(())
     })();
-    ratatui::restore();
-    // dropping the runtime kills any agent still running (kill_on_drop)
-    rt.shutdown_timeout(Duration::from_millis(300));
+    // dropping the runtime kills every agent process (kill_on_drop); sessions stay resumable
+    rt.shutdown_timeout(Duration::from_millis(400));
     result?;
-    println!("{}", app.summary());
-    Ok(())
+    Ok(Some(app.summary()))
 }

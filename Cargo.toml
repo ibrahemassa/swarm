@@ -1,10 +1,15 @@
 [package]
 name = "swarm"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 rust-version = "1.90"
 resolver = "3"
-description = "A swarm of Claude / Codex / Antigravity agents building a web page together, on a dashboard that looks unreasonably busy"
+description = "A terminal mission control for a team of Claude Code, Codex and Antigravity agents that build a web page together, and keep taking orders while you talk to them"
+license = "MIT"
+repository = "https://github.com/ibrahemassa/swarm"
+readme = "README.md"
+keywords = ["ai-agents", "claude-code", "codex", "tui", "multi-agent"]
+categories = ["command-line-utilities", "development-tools"]
 
 [dependencies]
 ratatui = "0.29"

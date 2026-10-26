@@ -1,15 +1,20 @@
-//! Demo mode: scripted agents, real files, zero tokens. Builds a neon ramen-bar landing page.
+//! Demo mode: scripted agents, real files, zero tokens. Builds a neon ramen-bar landing page,
+//! then keeps playing along when you talk to the swarm.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
+use tokio::sync::mpsc::UnboundedReceiver;
+use tokio::task::{AbortHandle, JoinSet};
 use tokio::time::sleep;
 
-use crate::app::{AgentEv, Ev, Phase, PlanItem};
+use crate::app::{AgentEv, Ev, Level, Phase, PlanItem};
 use crate::fx::Rng;
-use crate::orchestrator::{self, msg, Config, Page, Shared, Tx};
+use crate::orchestrator::{self, msg, name_word, Cmd, Config, Page, Shared, Tx};
+use crate::providers::AgentSpec;
 
 pub const TASK: &str = "landing page for NOODLE//NOIR, a neon late-night ramen bar";
 
@@ -340,12 +345,23 @@ fn layout(n: usize) -> Vec<(usize, String)> {
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn worker(idx: usize, name: String, lead: String, peers: Vec<String>, sec: &'static Section, id: String, dir: PathBuf, tx: Tx, seed: u64) {
+async fn worker(
+    idx: usize,
+    name: String,
+    lead: String,
+    peers: Vec<String>,
+    sec: &'static Section,
+    id: String,
+    dir: PathBuf,
+    tx: Tx,
+    seed: u64,
+) {
     let mut rng = Rng::new(seed);
     let mut tokens = 0u64;
     let cps = rng.range(70.0, 120.0);
     let fill = |s: &str| s.replace("__ID__", &id);
     sleep(ms(rng.range(300.0, 3500.0))).await;
+    send(&tx, idx, AgentEv::Turn(format!("build #{id}")));
     send(&tx, idx, AgentEv::Start);
     sleep(ms(rng.range(1200.0, 2600.0))).await;
     stream(&tx, idx, Out::Thinking, sec.think, 45.0, &mut rng, &mut tokens).await;
@@ -374,7 +390,8 @@ async fn worker(idx: usize, name: String, lead: String, peers: Vec<String>, sec:
     // polish pass: a real edit that adds keyboard focus rings
     stream(&tx, idx, Out::Thinking, "Polish pass: contrast, focus states, 375px.\n", 45.0, &mut rng, &mut tokens).await;
     quick_tool(&tx, idx, "Grep", &format!("var(-- in styles/{id}.css"), rng.range(600.0, 1200.0)).await;
-    let polish = fill("\n/* a11y: visible keyboard focus */\n#__ID__ a:focus-visible { outline: 2px solid var(--cyan); outline-offset: 3px; }\n");
+    let polish =
+        fill("\n/* a11y: visible keyboard focus */\n#__ID__ a:focus-visible { outline: 2px solid var(--cyan); outline-offset: 3px; }\n");
     send(&tx, idx, AgentEv::ToolStart("Edit".into()));
     send(&tx, idx, AgentEv::ToolDetail(format!("styles/{id}.css")));
     sleep(ms(rng.range(300.0, 700.0))).await;
@@ -396,29 +413,270 @@ async fn worker(idx: usize, name: String, lead: String, peers: Vec<String>, sec:
     send(&tx, idx, AgentEv::Done(summary));
 }
 
-pub async fn run(cfg: Config, tx: Tx) {
+const TASK_THINK: &[&str] = &[
+    "Re-reading my section with that in mind.\nSmallest change that gets there, keep the palette.\n",
+    "Checking which selectors this touches.\nScoped edit, no global side effects.\n",
+    "Easy one. Adjusting spacing and type scale, then a quick 375px check.\n",
+];
+const TASK_DONE: &[&str] = &["done, tweak is live", "shipped it, scoped and clean", "updated, check the page", "done. kept it on-palette"];
+const LEAD_ROUTES: &[&str] = &[
+    "On it. Splitting that across the team now.",
+    "Good call. Routing it to the owners, watch the page.",
+    "Easy. Handing it out, back in a moment.",
+];
+
+/// A follow-up turn: think, read the file, make a (harmless, real) edit, report back.
+#[allow(clippy::too_many_arguments)]
+async fn task(idx: usize, name: String, reply_to: String, label: String, ask: String, id: Option<String>, dir: PathBuf, tx: Tx, seed: u64) {
+    let mut rng = Rng::new(seed);
+    let mut tokens = 0u64;
+    send(&tx, idx, AgentEv::Turn(label));
+    send(&tx, idx, AgentEv::Start);
+    sleep(ms(rng.range(700.0, 1600.0))).await;
+    stream(&tx, idx, Out::Thinking, &format!("Ask: \"{ask}\"\n{}", rng.pick(TASK_THINK)), 50.0, &mut rng, &mut tokens).await;
+    let reply = match id {
+        Some(id) => {
+            quick_tool(&tx, idx, "Read", &format!("sections/{id}.html"), rng.range(600.0, 1200.0)).await;
+            let rel = format!("styles/{id}.css");
+            let note = format!("\n/* request: {} */\n#{id} {{ scroll-margin-top: 24px; }}\n", ask.replace("*/", "* /"));
+            send(&tx, idx, AgentEv::ToolStart("Edit".into()));
+            send(&tx, idx, AgentEv::ToolDetail(rel.clone()));
+            sleep(ms(rng.range(300.0, 700.0))).await;
+            stream(&tx, idx, Out::Code, &note, rng.range(70.0, 110.0), &mut rng, &mut tokens).await;
+            let old = std::fs::read_to_string(dir.join(&rel)).unwrap_or_default();
+            let _ = std::fs::write(dir.join(&rel), format!("{old}{note}"));
+            send(&tx, idx, AgentEv::ToolDone(false));
+            rng.pick(TASK_DONE).to_string()
+        }
+        None => "I don't own a section yet, ask the lead to give me one.".to_string(),
+    };
+    stream(&tx, idx, Out::Text, &format!("{reply}\n"), 110.0, &mut rng, &mut tokens).await;
+    msg(&tx, &name, &reply_to, reply.clone());
+    send(&tx, idx, AgentEv::Cost(tokens as f64 * 15e-6));
+    send(&tx, idx, AgentEv::Done(reply));
+}
+
+struct Demo {
+    cfg: Config,
+    tx: Tx,
+    rng: Rng,
+    names: Vec<String>,
+    items: Vec<PlanItem>,
+    round: u32,
+    in_round: bool,
+    work: JoinSet<usize>,
+    running: HashMap<usize, AbortHandle>,
+    pinging: Option<Arc<AtomicBool>>,
+    aborted: bool,
+}
+
+impl Demo {
+    fn lead(&self) -> String {
+        self.names[0].clone()
+    }
+
+    fn owned(&self, name: &str) -> Option<String> {
+        self.items.iter().find(|i| i.agent == name).map(|i| i.id.clone())
+    }
+
+    fn start_round(&mut self) {
+        if self.in_round {
+            return;
+        }
+        self.in_round = true;
+        let _ = self.tx.send(Ev::Phase(Phase::Build));
+        let flag = Arc::new(AtomicBool::new(false));
+        self.pinging = Some(flag.clone());
+        let (tx, lead) = (self.tx.clone(), self.lead());
+        tokio::spawn(async move {
+            let mut rng = Rng::seeded();
+            loop {
+                sleep(ms(rng.range(9000.0, 15000.0))).await;
+                if flag.load(Ordering::Relaxed) {
+                    break;
+                }
+                msg(&tx, &lead, "all", *rng.pick(LEAD_PINGS));
+            }
+        });
+    }
+
+    fn task(&mut self, idx: usize, reply_to: &str, label: String, ask: &str) {
+        let name = self.names[idx].clone();
+        let id = self.owned(&name);
+        let seed = self.rng.next();
+        let h = self.work.spawn({
+            let (reply_to, ask, dir, tx) = (reply_to.to_string(), ask.to_string(), self.cfg.dir.clone(), self.tx.clone());
+            async move {
+                task(idx, name, reply_to, label, ask, id, dir, tx, seed).await;
+                idx
+            }
+        });
+        self.running.insert(idx, h);
+    }
+
+    async fn route(&mut self, text: &str) {
+        let lead = self.lead();
+        let mut tokens = 0;
+        send(&self.tx, 0, AgentEv::Turn("message from you".into()));
+        send(&self.tx, 0, AgentEv::Start);
+        let _ = self.tx.send(Ev::Phase(Phase::Plan));
+        sleep(ms(600.0)).await;
+        let n = self.names.len().saturating_sub(1);
+        if n == 0 {
+            return;
+        }
+        let picks: Vec<usize> = {
+            let k = 1 + self.rng.below(2.min(n));
+            let mut v: Vec<usize> = Vec::new();
+            while v.len() < k {
+                let i = 1 + self.rng.below(n);
+                if !v.contains(&i) {
+                    v.push(i);
+                }
+            }
+            v
+        };
+        let who = picks.iter().map(|i| self.names[*i].clone()).collect::<Vec<_>>().join(" and ");
+        let think = format!("User wants: \"{text}\".\nThat lands in {who}'s sections. Delegating, base.css stays as is.\n");
+        stream(&self.tx, 0, Out::Thinking, &think, 70.0, &mut self.rng, &mut tokens).await;
+        let reply = self.rng.pick(LEAD_ROUTES).to_string();
+        stream(&self.tx, 0, Out::Text, &format!("{reply}\n"), 110.0, &mut self.rng, &mut tokens).await;
+        send(&self.tx, 0, AgentEv::Done(reply.clone()));
+        msg(&self.tx, &lead, "you", reply);
+        self.start_round();
+        for i in picks {
+            let name = self.names[i].clone();
+            msg(&self.tx, &lead, &name, orchestrator::trunc(text, 120));
+            self.task(i, &lead.clone(), format!("task from {lead}"), text);
+        }
+    }
+
+    fn ship(&mut self) {
+        self.in_round = false;
+        if let Some(f) = self.pinging.take() {
+            f.store(true, Ordering::Relaxed);
+        }
+        let page = Page { title: TITLE.into(), ids: self.items.iter().map(|i| i.id.clone()).collect(), placeholders: false };
+        orchestrator::assemble(&self.cfg.dir, &page);
+        let _ = self.tx.send(Ev::Phase(Phase::Ship));
+        let _ = self.tx.send(Ev::Shipped(self.round));
+        self.round += 1;
+    }
+
+    async fn review(&mut self) {
+        let mut tokens = 0;
+        let n = self.items.len();
+        let _ = self.tx.send(Ev::Phase(Phase::Review));
+        send(&self.tx, 0, AgentEv::Turn("review the page".into()));
+        send(&self.tx, 0, AgentEv::Start);
+        sleep(ms(700.0)).await;
+        stream(
+            &self.tx,
+            0,
+            Out::Thinking,
+            &format!("Reviewing {n} sections: nav anchors, scoping, 375px overflow.\n"),
+            90.0,
+            &mut self.rng,
+            &mut tokens,
+        )
+        .await;
+        quick_tool(&self.tx, 0, "Read", "index.html", 900.0).await;
+        quick_tool(&self.tx, 0, "Grep", "href=\"#", 600.0).await;
+        stream(
+            &self.tx,
+            0,
+            Out::Text,
+            "All anchors resolve, every selector scoped, nothing overflows. Shipping.\n",
+            110.0,
+            &mut self.rng,
+            &mut tokens,
+        )
+        .await;
+        send(&self.tx, 0, AgentEv::Done("review clean".into()));
+    }
+
+    async fn command(&mut self, c: Cmd) {
+        match c {
+            Cmd::Say { to, text } => {
+                let lead = self.lead();
+                if to.eq_ignore_ascii_case(&lead) || to.eq_ignore_ascii_case("lead") {
+                    self.route(&text).await;
+                } else if to == "all" {
+                    self.start_round();
+                    for i in 1..self.names.len() {
+                        self.task(i, "you", "message from you".into(), &text);
+                    }
+                } else if let Some(i) = self.names.iter().position(|n| *n == to) {
+                    self.start_round();
+                    self.task(i, "you", "message from you".into(), &text);
+                }
+            }
+            Cmd::Add(p, model) => {
+                let word = name_word(p, &model);
+                let mut k = 1;
+                while self.names.contains(&format!("{word}-{k}")) {
+                    k += 1;
+                }
+                let spec = AgentSpec { name: format!("{word}-{k}"), provider: p, model };
+                let _ = self.tx.send(Ev::Spawn(spec.clone(), format!("joined the swarm ({} {})", p.label(), spec.model_label())));
+                self.names.push(spec.name.clone());
+                msg(&self.tx, &self.lead(), &spec.name, "welcome aboard. Stand by for a section.");
+            }
+            Cmd::Stop(who) => {
+                let targets: Vec<usize> = match who.and_then(|w| self.names.iter().position(|n| n.eq_ignore_ascii_case(&w))) {
+                    Some(i) => vec![i],
+                    None => self.running.keys().copied().collect(),
+                };
+                self.aborted = true;
+                for i in targets {
+                    if let Some(h) = self.running.remove(&i) {
+                        h.abort();
+                        send(&self.tx, i, AgentEv::Stopped);
+                    }
+                }
+            }
+            Cmd::Review => {
+                if !self.in_round {
+                    self.review().await;
+                    self.ship();
+                }
+            }
+        }
+    }
+}
+
+const TITLE: &str = "NOODLE//NOIR · ramen after hours";
+
+pub async fn run(cfg: Config, tx: Tx, mut cmds: UnboundedReceiver<Cmd>) {
     let shared = Shared::default();
     *shared.names.lock().unwrap() = cfg.roster.iter().map(|s| s.name.clone()).collect();
+    let url = crate::server::start(cfg.dir.clone(), shared.version.clone()).await;
+    if let Some(u) = &url {
+        let _ = tx.send(Ev::Server(u.clone()));
+    }
     tokio::spawn(orchestrator::watch_files(cfg.dir.clone(), tx.clone(), shared.clone()));
-    sleep(ms(2600.0)).await; // let the boot sequence breathe
+    sleep(ms(2200.0)).await; // let the boot sequence breathe
 
     let mut rng = Rng::seeded();
     let mut tokens = 0u64;
-    let lead = cfg.roster[0].name.clone();
-    let workers: Vec<(usize, String)> = cfg.roster.iter().enumerate().skip(1).map(|(i, s)| (i, s.name.clone())).collect();
+    let names: Vec<String> = cfg.roster.iter().map(|s| s.name.clone()).collect();
+    let lead = names[0].clone();
+    let workers: Vec<(usize, String)> = names.iter().cloned().enumerate().skip(1).collect();
     let n = workers.len();
     if n == 0 {
+        log_line(&tx, "demo needs at least one worker");
         return;
     }
 
     let _ = tx.send(Ev::Phase(Phase::Plan));
+    send(&tx, 0, AgentEv::Turn("plan the page".into()));
     send(&tx, 0, AgentEv::Start);
     sleep(ms(900.0)).await;
     let think = format!(
         "Request: a landing page for a late-night ramen bar.\nSplitting the page into {n} sections, one owner each, top to bottom.\nArt direction: ink-black, neon pink accent, cyan for data, amber for prices.\nType: Space Grotesk for UI, Noto Serif JP for a giant ghost kanji.\nEveryone scopes CSS under their section id so nobody collides.\nDesign system first. Writing base.css.\n"
     );
-    stream(&tx, 0, Out::Thinking, &think, 55.0, &mut rng, &mut tokens).await;
-    write_file(&tx, 0, &cfg.dir, "styles/base.css", BASE_CSS, 140.0, &mut rng, &mut tokens).await;
+    stream(&tx, 0, Out::Thinking, &think, 90.0, &mut rng, &mut tokens).await;
+    write_file(&tx, 0, &cfg.dir, "styles/base.css", BASE_CSS, 260.0, &mut rng, &mut tokens).await;
     stream(&tx, 0, Out::Text, &format!("Plan locked: {n} sections. Dispatching the team.\n"), 110.0, &mut rng, &mut tokens).await;
     send(&tx, 0, AgentEv::Cost(tokens as f64 * 75e-6));
     send(&tx, 0, AgentEv::Done("plan locked".into()));
@@ -429,61 +687,79 @@ pub async fn run(cfg: Config, tx: Tx) {
         .zip(&workers)
         .map(|((k, id), (_, name))| PlanItem { id: id.clone(), agent: name.clone(), brief: SECTIONS[*k].brief.to_string() })
         .collect();
-    let title = "NOODLE//NOIR · ramen after hours".to_string();
-    let page = Page { title: title.clone(), ids: items.iter().map(|i| i.id.clone()).collect(), live: cfg.live };
+    let page = Page { title: TITLE.into(), ids: items.iter().map(|i| i.id.clone()).collect(), placeholders: true };
     *shared.page.lock().unwrap() = Some(page.clone());
     orchestrator::assemble(&cfg.dir, &page);
-    let _ = tx.send(Ev::Plan(title, items.clone()));
-    if cfg.live {
-        orchestrator::open(&cfg.dir.join("index.html"));
-    }
+    let _ = tx.send(Ev::Plan(TITLE.into(), items.clone()));
     for it in &items {
         let brief: String = it.brief.chars().take(90).collect();
         msg(&tx, &lead, &it.agent, format!("you own #{}: {brief}", it.id));
         sleep(ms(150.0)).await;
     }
 
-    let _ = tx.send(Ev::Phase(Phase::Build));
-    let all_done = Arc::new(AtomicBool::new(false));
-    {
-        let (tx, lead, done) = (tx.clone(), lead.clone(), all_done.clone());
-        tokio::spawn(async move {
-            let mut rng = Rng::seeded();
-            loop {
-                sleep(ms(rng.range(9000.0, 15000.0))).await;
-                if done.load(Ordering::Relaxed) {
-                    break;
-                }
-                msg(&tx, &lead, "all", *rng.pick(LEAD_PINGS));
-            }
-        });
+    let mut d = Demo {
+        cfg: cfg.clone(),
+        tx: tx.clone(),
+        rng: Rng::seeded(),
+        names: names.clone(),
+        items: items.clone(),
+        round: 1,
+        in_round: false,
+        work: JoinSet::new(),
+        running: HashMap::new(),
+        pinging: None,
+        aborted: false,
+    };
+    d.start_round();
+    if cfg.live {
+        if let Some(u) = &url {
+            orchestrator::open(u);
+        }
     }
-    let names: Vec<String> = workers.iter().map(|(_, n)| n.clone()).collect();
-    let mut handles = Vec::new();
+    let peers_all: Vec<String> = workers.iter().map(|(_, n)| n.clone()).collect();
     for ((k, id), (idx, name)) in picks.into_iter().zip(workers.iter().cloned()) {
-        let peers: Vec<String> = names.iter().filter(|p| **p != name).cloned().collect();
+        let peers: Vec<String> = peers_all.iter().filter(|p| **p != name).cloned().collect();
         let seed = rng.next();
-        handles.push(tokio::spawn(worker(idx, name, lead.clone(), peers, &SECTIONS[k], id, cfg.dir.clone(), tx.clone(), seed)));
+        let (lead, dir, tx) = (lead.clone(), cfg.dir.clone(), tx.clone());
+        let h = d.work.spawn(async move {
+            worker(idx, name, lead, peers, &SECTIONS[k], id, dir, tx, seed).await;
+            idx
+        });
+        d.running.insert(idx, h);
     }
-    for h in handles {
-        let _ = h.await;
-    }
-    all_done.store(true, Ordering::Relaxed);
-    let page = Page { live: false, ..page };
-    *shared.page.lock().unwrap() = Some(page.clone());
-    orchestrator::assemble(&cfg.dir, &page);
+    let mut first = true;
 
-    if cfg.review {
-        let _ = tx.send(Ev::Phase(Phase::Review));
-        send(&tx, 0, AgentEv::Start);
-        sleep(ms(700.0)).await;
-        stream(&tx, 0, Out::Thinking, &format!("Reviewing {n} sections: nav anchors, scoping, 375px overflow.\n"), 90.0, &mut rng, &mut tokens).await;
-        quick_tool(&tx, 0, "Read", "index.html", 900.0).await;
-        quick_tool(&tx, 0, "Grep", "href=\"#", 600.0).await;
-        stream(&tx, 0, Out::Text, "All anchors resolve, every selector scoped, nothing overflows. Shipping.\n", 110.0, &mut rng, &mut tokens).await;
-        send(&tx, 0, AgentEv::Done("review clean".into()));
+    loop {
+        tokio::select! {
+            c = cmds.recv() => match c {
+                Some(c) => d.command(c).await,
+                None => break,
+            },
+            Some(r) = d.work.join_next(), if !d.work.is_empty() => {
+                if let Ok(idx) = r {
+                    d.running.remove(&idx);
+                }
+                if d.work.is_empty() && d.in_round && d.aborted {
+                    d.aborted = false;
+                    d.in_round = false;
+                    if let Some(f) = d.pinging.take() {
+                        f.store(true, Ordering::Relaxed);
+                    }
+                    let _ = tx.send(Ev::Phase(Phase::Ship));
+                    let _ = tx.send(Ev::Log(Level::Warn, "round stopped".into()));
+                } else if d.work.is_empty() && d.in_round {
+                    if first && cfg.review {
+                        d.review().await;
+                    }
+                    first = false;
+                    *shared.page.lock().unwrap() = Some(Page { title: TITLE.into(), ids: d.items.iter().map(|i| i.id.clone()).collect(), placeholders: false });
+                    d.ship();
+                }
+            }
+        }
     }
-    sleep(ms(400.0)).await;
-    let _ = tx.send(Ev::Phase(Phase::Ship));
-    let _ = tx.send(Ev::Shipped);
+}
+
+fn log_line(tx: &Tx, s: &str) {
+    let _ = tx.send(Ev::Log(Level::Bad, s.into()));
 }

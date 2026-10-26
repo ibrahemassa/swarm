@@ -1,1 +1,4 @@
 /target
+
+# projects swarm builds when you run it from inside the repo
+/swarm-*/

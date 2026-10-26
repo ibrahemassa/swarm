@@ -12,52 +12,52 @@ use ratatui::widgets::canvas::{Canvas, Circle, Line as CanvasLine, Points};
 use ratatui::widgets::{Block, BorderType, Clear, Paragraph};
 use ratatui::Frame;
 
-use crate::app::{AState, Agent, App, FileEntry, Kind, Level, Phase};
+use crate::app::{AState, Agent, App, FileEntry, Kind, Level, Phase, COMMANDS, YOU};
 use crate::fx::{self, dim, hsv, lerp};
 
-const TEXT: Color = Color::Rgb(226, 226, 236);
-const SOFT: Color = Color::Rgb(176, 176, 196);
-const MUTED: Color = Color::Rgb(128, 128, 154);
-const FAINT: Color = Color::Rgb(66, 66, 88);
-const WHITE: Color = Color::Rgb(255, 255, 255);
-const GREEN: Color = Color::Rgb(80, 250, 123);
-const RED: Color = Color::Rgb(255, 85, 85);
-const GOLD: Color = Color::Rgb(255, 196, 0);
-const AMBER: Color = Color::Rgb(255, 203, 107);
-const PINK: Color = Color::Rgb(255, 121, 198);
-const NEON: Color = Color::Rgb(255, 46, 136);
-const CYAN: Color = Color::Rgb(139, 233, 253);
-const PURPLE: Color = Color::Rgb(189, 147, 249);
-const ORANGE: Color = Color::Rgb(255, 184, 108);
+pub(crate) const TEXT: Color = Color::Rgb(226, 226, 236);
+pub(crate) const SOFT: Color = Color::Rgb(176, 176, 196);
+pub(crate) const MUTED: Color = Color::Rgb(128, 128, 154);
+pub(crate) const FAINT: Color = Color::Rgb(66, 66, 88);
+pub(crate) const WHITE: Color = Color::Rgb(255, 255, 255);
+pub(crate) const GREEN: Color = Color::Rgb(80, 250, 123);
+pub(crate) const RED: Color = Color::Rgb(255, 85, 85);
+pub(crate) const GOLD: Color = Color::Rgb(255, 196, 0);
+pub(crate) const AMBER: Color = Color::Rgb(255, 203, 107);
+pub(crate) const PINK: Color = Color::Rgb(255, 121, 198);
+pub(crate) const NEON: Color = Color::Rgb(255, 46, 136);
+pub(crate) const CYAN: Color = Color::Rgb(139, 233, 253);
+pub(crate) const PURPLE: Color = Color::Rgb(189, 147, 249);
+pub(crate) const ORANGE: Color = Color::Rgb(255, 184, 108);
 const PUNCT: Color = Color::Rgb(120, 130, 160);
 const LAVENDER: Color = Color::Rgb(170, 150, 220);
 
-fn st(c: Color) -> Style {
+pub(crate) fn st(c: Color) -> Style {
     Style::new().fg(c)
 }
 
-fn span(s: impl Into<String>, c: Color) -> Span<'static> {
+pub(crate) fn span(s: impl Into<String>, c: Color) -> Span<'static> {
     Span::styled(s.into(), st(c))
 }
 
-fn bold(s: impl Into<String>, c: Color) -> Span<'static> {
+pub(crate) fn bold(s: impl Into<String>, c: Color) -> Span<'static> {
     Span::styled(s.into(), st(c).add_modifier(Modifier::BOLD))
 }
 
-fn put(buf: &mut Buffer, x: u16, y: u16, ch: char, fg: Color) {
+pub(crate) fn put(buf: &mut Buffer, x: u16, y: u16, ch: char, fg: Color) {
     if let Some(c) = buf.cell_mut((x, y)) {
         c.set_char(ch);
         c.set_fg(fg);
     }
 }
 
-fn line_at(buf: &mut Buffer, area: Rect, x: u16, y: u16, line: &Line) {
+pub(crate) fn line_at(buf: &mut Buffer, area: Rect, x: u16, y: u16, line: &Line) {
     if y < area.bottom() && x < area.right() {
         buf.set_line(x, y, line, area.right() - x);
     }
 }
 
-fn centered(buf: &mut Buffer, area: Rect, y: u16, line: &Line) {
+pub(crate) fn centered(buf: &mut Buffer, area: Rect, y: u16, line: &Line) {
     let w = line.width() as u16;
     line_at(buf, area, area.x + area.width.saturating_sub(w) / 2, y, line);
 }
@@ -87,7 +87,7 @@ fn fmt_bytes(b: u64) -> String {
     }
 }
 
-fn trunc(s: &str, w: usize) -> String {
+pub(crate) fn trunc(s: &str, w: usize) -> String {
     if s.chars().count() <= w {
         s.to_string()
     } else if w == 0 {
@@ -97,7 +97,7 @@ fn trunc(s: &str, w: usize) -> String {
     }
 }
 
-fn wrap_words(s: &str, w: usize) -> Vec<String> {
+pub(crate) fn wrap_words(s: &str, w: usize) -> Vec<String> {
     let mut out = Vec::new();
     let mut cur = String::new();
     for word in s.split_whitespace() {
@@ -116,7 +116,7 @@ fn wrap_words(s: &str, w: usize) -> Vec<String> {
     out
 }
 
-fn shimmer(text: &str, base: Color, t: f32) -> Vec<Span<'static>> {
+pub(crate) fn shimmer(text: &str, base: Color, t: f32) -> Vec<Span<'static>> {
     text.chars()
         .enumerate()
         .map(|(i, ch)| {
@@ -126,7 +126,7 @@ fn shimmer(text: &str, base: Color, t: f32) -> Vec<Span<'static>> {
         .collect()
 }
 
-fn bar(p: f32, w: usize, color: Color, t: f32) -> Vec<Span<'static>> {
+pub(crate) fn bar(p: f32, w: usize, color: Color, t: f32) -> Vec<Span<'static>> {
     const PART: [&str; 8] = ["", "▏", "▎", "▍", "▌", "▋", "▊", "▉"];
     let p = p.clamp(0.0, 1.0);
     let total = p * w as f32;
@@ -174,11 +174,7 @@ fn parse_hex(word: &str) -> Option<Color> {
             let v: Vec<u8> = h.chars().take(3).map(|c| c.to_digit(16).unwrap_or(0) as u8 * 17).collect();
             (v[0], v[1], v[2])
         }
-        6 | 8 => (
-            u8::from_str_radix(&h[0..2], 16).ok()?,
-            u8::from_str_radix(&h[2..4], 16).ok()?,
-            u8::from_str_radix(&h[4..6], 16).ok()?,
-        ),
+        6 | 8 => (u8::from_str_radix(&h[0..2], 16).ok()?, u8::from_str_radix(&h[2..4], 16).ok()?, u8::from_str_radix(&h[4..6], 16).ok()?),
         _ => return None,
     };
     let c = Color::Rgb(r, g, b);
@@ -188,9 +184,33 @@ fn parse_hex(word: &str) -> Option<Color> {
 }
 
 const KEYWORDS: &[&str] = &[
-    "const", "let", "var", "function", "return", "if", "else", "for", "of", "in", "new", "=>", "document",
-    "window", "class", "import", "export", "async", "await", "true", "false", "null", "this", "@media",
-    "@keyframes", "@import", "!important",
+    "const",
+    "let",
+    "var",
+    "function",
+    "return",
+    "if",
+    "else",
+    "for",
+    "of",
+    "in",
+    "new",
+    "=>",
+    "document",
+    "window",
+    "class",
+    "import",
+    "export",
+    "async",
+    "await",
+    "true",
+    "false",
+    "null",
+    "this",
+    "@media",
+    "@keyframes",
+    "@import",
+    "!important",
 ];
 
 /// Tiny HTML/CSS/JS highlighter. Hex colors render in their own color.
@@ -231,7 +251,13 @@ fn highlight(s: &str) -> Line<'static> {
             }
             spans.push(span(chars[st_i..i].iter().collect::<String>(), ORANGE));
             tag_next = false;
-        } else if c.is_alphabetic() || c == '-' || c == '_' || c == '@' || c == '!' || (c == '.' && chars.get(i + 1).is_some_and(|n| n.is_alphabetic())) {
+        } else if c.is_alphabetic()
+            || c == '-'
+            || c == '_'
+            || c == '@'
+            || c == '!'
+            || (c == '.' && chars.get(i + 1).is_some_and(|n| n.is_alphabetic()))
+        {
             i += 1;
             while i < chars.len() && (chars[i].is_alphanumeric() || matches!(chars[i], '-' | '_')) {
                 i += 1;
@@ -274,35 +300,51 @@ fn highlight(s: &str) -> Line<'static> {
     Line::from(spans)
 }
 
-fn render_line(kind: Kind, s: &str) -> Line<'static> {
+fn render_line(kind: Kind, s: &str, width: usize) -> Line<'static> {
     match kind {
         Kind::Text => Line::from(span(s.to_string(), TEXT)),
         Kind::Thinking => Line::from(Span::styled(s.to_string(), st(LAVENDER).add_modifier(Modifier::ITALIC))),
         Kind::Code => highlight(s),
+        Kind::Divider => {
+            let label = format!(" {} ", trunc(s, width.saturating_sub(6)));
+            let rest = width.saturating_sub(label.chars().count() + 2);
+            Line::from(vec![span("──", FAINT), span(label, MUTED), span("─".repeat(rest), FAINT)])
+        }
+        Kind::You => Line::from(Span::styled(s.to_string(), Style::new().fg(Color::Black).bg(Color::Rgb(200, 200, 215)))),
     }
 }
 
 fn stream_lines(app: &App, a: &Agent, width: usize, height: usize) -> Vec<Line<'static>> {
+    stream_lines_at(app, a, width, height, 0)
+}
+
+/// The last `height` wrapped lines of an agent's log, `skip` lines up from the bottom.
+fn stream_lines_at(app: &App, a: &Agent, width: usize, height: usize, skip: usize) -> Vec<Line<'static>> {
     if width == 0 || height == 0 {
         return Vec::new();
     }
     let mut out: Vec<Line> = Vec::new();
+    let mut skipped = 0;
     'outer: for (k, text) in a.lines.iter().rev() {
         let chars: Vec<char> = text.chars().collect();
-        let chunks: Vec<String> = if chars.is_empty() {
-            vec![String::new()]
+        let chunks: Vec<String> = if chars.is_empty() || *k == Kind::Divider {
+            vec![text.clone()]
         } else {
             chars.chunks(width).map(|c| c.iter().collect()).collect()
         };
         for c in chunks.iter().rev() {
-            out.push(render_line(*k, c));
+            if skipped < skip {
+                skipped += 1;
+                continue;
+            }
+            out.push(render_line(*k, c, width));
             if out.len() >= height {
                 break 'outer;
             }
         }
     }
     out.reverse();
-    if a.working() && (app.frame / 12) % 2 == 0 {
+    if skip == 0 && a.working() && (app.frame / 12).is_multiple_of(2) {
         if let Some(last) = out.last_mut() {
             if last.width() < width {
                 last.spans.push(span("▌", a.color));
@@ -360,8 +402,9 @@ fn border_color(app: &App, i: usize) -> Color {
     let a = &app.agents[i];
     let t = app.t;
     let base = match a.state {
-        AState::Done => GREEN,
+        AState::Done => dim(GREEN, 0.75),
         AState::Failed => lerp(RED, dim(RED, 0.4), 0.5 + 0.5 * (t * 8.0).sin()),
+        AState::Stopped => dim(AMBER, 0.7),
         AState::Queued => FAINT,
         AState::Booting => {
             if fx::hash(i as u32, (t * 12.0) as u32) > 0.5 {
@@ -372,11 +415,9 @@ fn border_color(app: &App, i: usize) -> Color {
         }
         _ => lerp(dim(a.color, 0.35), a.color, 0.5 + 0.5 * (t * 3.5 + i as f32).sin()),
     };
-    let base = if i == 0 && app.phase == Phase::Build && !a.working() {
-        lerp(dim(GOLD, 0.4), GOLD, 0.5 + 0.5 * (t * 2.5).sin())
-    } else {
-        base
-    };
+    let base =
+        if i == 0 && app.phase == Phase::Build && !a.working() { lerp(dim(GOLD, 0.4), GOLD, 0.5 + 0.5 * (t * 2.5).sin()) } else { base };
+    let base = if app.selected == Some(i) { lerp(base, WHITE, 0.55 + 0.25 * (t * 4.0).sin()) } else { base };
     match a.flash {
         Some((at, c)) => {
             let k = at.elapsed().as_secs_f32() / 0.7;
@@ -394,13 +435,12 @@ fn status_line(app: &App, i: usize) -> Line<'static> {
     let a = &app.agents[i];
     let el = fmt_dur(a.elapsed());
     match a.state {
-        AState::Queued => Line::from(span("○ waiting for orders", MUTED)),
-        AState::Done => Line::from(vec![
-            bold("✔ ", GREEN),
-            bold(format!("Shipped in {el}"), GREEN),
-            span(format!(" · ↓ {} tokens", fmt_k(a.tokens)), MUTED),
-        ]),
+        AState::Queued => Line::from(span("○ awaiting orders", MUTED)),
+        AState::Done => {
+            Line::from(vec![bold("✔ ", GREEN), bold("Done", GREEN), span(format!(" in {el} · ↓ {} tokens · idle", fmt_k(a.tokens)), MUTED)])
+        }
         AState::Failed => Line::from(vec![bold("✖ ", RED), span(a.error.clone().unwrap_or_default(), RED)]),
+        AState::Stopped => Line::from(vec![bold("■ ", AMBER), bold("Stopped", AMBER), span(" · message me to pick it back up", MUTED)]),
         AState::Booting => {
             let fr = fx::SPINNER[(app.frame as usize / 2 + i) % fx::SPINNER.len()];
             let mut s = vec![bold(format!("{fr} "), a.color)];
@@ -421,17 +461,17 @@ fn status_line(app: &App, i: usize) -> Line<'static> {
 fn tool_line(app: &App, i: usize) -> Line<'static> {
     let a = &app.agents[i];
     if a.state == AState::Done && !a.summary.is_empty() {
-        // the lead's plan answer is raw JSON; don't print that
-        let s = if a.summary.starts_with('{') { "plan locked".to_string() } else { a.summary.clone() };
+        // the lead's answers are raw JSON; don't print that
+        let s = if a.summary.starts_with('{') || a.summary.starts_with("```") { "orders sent".to_string() } else { a.summary.clone() };
         return Line::from(vec![span("⎿ ", GREEN), span(s, SOFT)]);
     }
     if a.tool.is_empty() {
-        let s = if a.state == AState::Queued { "⎿ standing by" } else { "⎿ warming up…" };
+        let s = if matches!(a.state, AState::Queued | AState::Done | AState::Stopped) { "⎿ standing by" } else { "⎿ warming up…" };
         return Line::from(span(s, FAINT));
     }
     let running = matches!(a.state, AState::Tool | AState::Writing);
     let dot = if running {
-        if (app.frame / 8) % 2 == 0 {
+        if (app.frame / 8).is_multiple_of(2) {
             a.color
         } else {
             dim(a.color, 0.35)
@@ -439,11 +479,7 @@ fn tool_line(app: &App, i: usize) -> Line<'static> {
     } else {
         MUTED
     };
-    Line::from(vec![
-        span(if running { "⏺ " } else { "⎿ " }, dot),
-        bold(a.tool.clone(), TEXT),
-        span(format!("({})", a.detail), MUTED),
-    ])
+    Line::from(vec![span(if running { "⏺ " } else { "⎿ " }, dot), bold(a.tool.clone(), TEXT), span(format!("({})", a.detail), MUTED)])
 }
 
 pub fn draw(f: &mut Frame, app: &mut App) {
@@ -454,13 +490,14 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         return;
     }
 
-    let bottom_h = if area.height >= 34 { 9 } else { 0 };
+    let bottom_h = if area.height >= 38 && !app.zoom { 9 } else { 0 };
     let top_h = (app.plan.len() as u16 + 5).clamp(11, 14).min(area.height / 3).max(5);
-    let [header, top, grid, bottom] = Layout::vertical([
+    let [header, top, grid, bottom, input] = Layout::vertical([
         Constraint::Length(1),
         Constraint::Length(top_h),
         Constraint::Min(5),
         Constraint::Length(bottom_h),
+        Constraint::Length(3),
     ])
     .areas(area);
     let (lead_area, mesh_area) = if area.width >= 110 {
@@ -472,9 +509,18 @@ pub fn draw(f: &mut Frame, app: &mut App) {
 
     app.rects.clear();
     app.rects.insert(0, lead_area);
-    let n = app.agents.len().saturating_sub(1);
-    for (k, r) in grid_rects(grid, n).into_iter().enumerate() {
-        app.rects.insert(k + 1, r);
+    app.rects.insert(YOU, input);
+    let zoomed = app.zoom.then_some(app.selected).flatten();
+    match zoomed {
+        Some(z) => {
+            app.rects.insert(z, grid);
+        }
+        None => {
+            let n = app.agents.len().saturating_sub(1);
+            for (k, r) in grid_rects(grid, n).into_iter().enumerate() {
+                app.rects.insert(k + 1, r);
+            }
+        }
     }
 
     let app: &App = app;
@@ -483,30 +529,38 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     if let Some(m) = mesh_area {
         draw_mesh(f, app, m);
     }
-    for i in 1..app.agents.len() {
-        if let Some(r) = app.rects.get(&i) {
-            draw_card(f, app, i, *r);
+    match zoomed {
+        Some(z) => draw_zoom(f, app, z, grid),
+        None => {
+            for i in 1..app.agents.len() {
+                if let Some(r) = app.rects.get(&i) {
+                    draw_card(f, app, i, *r);
+                }
+            }
         }
     }
     if bottom_h > 0 {
-        let [ev, files, comms] = Layout::horizontal([
-            Constraint::Percentage(44),
-            Constraint::Percentage(24),
-            Constraint::Percentage(32),
-        ])
-        .areas(bottom);
+        let [ev, files, comms] =
+            Layout::horizontal([Constraint::Percentage(44), Constraint::Percentage(24), Constraint::Percentage(32)]).areas(bottom);
         draw_events(f, app, ev);
         draw_files(f, app, files);
         draw_comms(f, app, comms);
     }
+    draw_input(f, app, input);
     draw_bubbles(f, app);
+    draw_reply(f, app, input);
     draw_packets(f, app);
-    if app.shipped.is_some() {
+    if app.banner_until.is_some() {
         draw_ship(f, app, area);
     }
     draw_particles(f, app, area);
     if app.fx {
         draw_scanline(f, app, area);
+    }
+    draw_suggestions(f, app, input);
+    draw_toast(f, app, area);
+    if app.help {
+        draw_help(f, app, area);
     }
     draw_wipe(f, app, area);
 }
@@ -549,10 +603,7 @@ fn draw_header(f: &mut Frame, app: &App, area: Rect) {
     for (i, p) in Phase::ALL.iter().enumerate() {
         let s = if *p == app.phase {
             let k = 0.5 + 0.5 * (t * 5.0).sin();
-            Style::new()
-                .fg(Color::Black)
-                .bg(lerp(Color::Rgb(0, 190, 255), NEON, k))
-                .add_modifier(Modifier::BOLD)
+            Style::new().fg(Color::Black).bg(lerp(Color::Rgb(0, 190, 255), NEON, k)).add_modifier(Modifier::BOLD)
         } else if *p < app.phase {
             st(GREEN)
         } else {
@@ -564,6 +615,10 @@ fn draw_header(f: &mut Frame, app: &App, area: Rect) {
             spans.push(span("━━", if *p < app.phase { dim(GREEN, 0.6) } else { FAINT }));
         }
     }
+    spans.push(span("  ", FAINT));
+    // between rounds, show the one that just shipped
+    let round = if app.phase == Phase::Ship && !app.busy() && app.round > 1 { app.round - 1 } else { app.round };
+    spans.push(Span::styled(format!(" ROUND {round} "), Style::new().fg(Color::Black).bg(PURPLE).add_modifier(Modifier::BOLD)));
     let left = Line::from(spans);
     let left_w = left.width() as u16;
     f.render_widget(left, area);
@@ -579,9 +634,23 @@ fn draw_header(f: &mut Frame, app: &App, area: Rect) {
         span("  ↓ ", MUTED),
         bold(fmt_k(app.total_tokens()), TEXT),
         span("  $", MUTED),
-        bold(format!("{:.2}", app.total_cost()), GREEN),
-        span("  ", MUTED),
     ];
+    if app.budget > 0.0 {
+        let k = (app.spent() / app.budget) as f32;
+        let c = if k >= 1.0 {
+            RED
+        } else if k > 0.8 {
+            AMBER
+        } else {
+            GREEN
+        };
+        right.push(bold(format!("{:.2}", app.spent()), c));
+        right.push(span(format!("/{:.0} ", app.budget), MUTED));
+        right.extend(bar(k, 6, c, app.t));
+    } else {
+        right.push(bold(format!("{:.2}", app.spent()), GREEN));
+    }
+    right.push(span("  ", MUTED));
     right.extend(spark(&app.rate, 16, CYAN));
     right.push(span(" ", MUTED));
     let right = Line::from(right);
@@ -594,40 +663,29 @@ fn draw_header(f: &mut Frame, app: &App, area: Rect) {
 fn lead_status(app: &App) -> Line<'static> {
     let a = &app.agents[0];
     let workers = &app.agents[1..];
-    let done = workers.iter().filter(|w| w.state == AState::Done).count();
-    match app.phase {
-        Phase::Ship => Line::from(vec![
-            bold("✔ ", GREEN),
-            bold("Shipped", GREEN),
-            span(
-                format!(
-                    " · {} agents · {} · ↓ {} tokens · {} messages",
-                    app.agents.len(),
-                    fmt_dur(app.elapsed()),
-                    fmt_k(app.total_tokens()),
-                    app.msg_count
-                ),
-                MUTED,
-            ),
-        ]),
-        Phase::Build if !a.working() => {
-            let fr = fx::STAR[(app.frame as usize / 3) % fx::STAR.len()];
-            let mut s = vec![bold(format!("{fr} "), GOLD)];
-            s.extend(shimmer("Orchestrating…", GOLD, app.t));
-            s.push(span(
-                format!(
-                    " ({} · ↓ {} tokens · {}/{} shipped)",
-                    fmt_dur(app.elapsed()),
-                    fmt_k(app.total_tokens()),
-                    done,
-                    workers.len()
-                ),
-                MUTED,
-            ));
-            Line::from(s)
-        }
-        _ => status_line(app, 0),
+    let busy = workers.iter().filter(|w| w.working()).count();
+    if a.working() {
+        return status_line(app, 0);
     }
+    if busy > 0 {
+        let fr = fx::STAR[(app.frame as usize / 3) % fx::STAR.len()];
+        let mut s = vec![bold(format!("{fr} "), GOLD)];
+        s.extend(shimmer("Orchestrating…", GOLD, app.t));
+        s.push(span(
+            format!(" ({} · ↓ {} tokens · {busy}/{} working)", fmt_dur(app.elapsed()), fmt_k(app.total_tokens()), workers.len()),
+            MUTED,
+        ));
+        return Line::from(s);
+    }
+    if app.phase == Phase::Ship && app.round > 1 {
+        let k = 0.5 + 0.5 * (app.t * 2.0).sin();
+        return Line::from(vec![
+            bold("◉ ", lerp(dim(GREEN, 0.5), GREEN, k)),
+            bold(format!("Live · round {} shipped", app.round - 1), GREEN),
+            span(format!(" · {} agents standing by · tell me what to change", app.agents.len()), MUTED),
+        ]);
+    }
+    status_line(app, 0)
 }
 
 fn plan_lines(app: &App, width: usize) -> Vec<Line<'static>> {
@@ -672,7 +730,7 @@ fn draw_lead(f: &mut Frame, app: &App, area: Rect) {
     let a = &app.agents[0];
     let bc = border_color(app, 0);
     let title = Line::from(vec![
-        span(" ", bc),
+        if app.selected == Some(0) { bold(" ▶ ", WHITE) } else { span(" ", bc) },
         bold("★ ", GOLD),
         bold(a.spec.name.clone(), GOLD),
         span(" ", bc),
@@ -681,13 +739,9 @@ fn draw_lead(f: &mut Frame, app: &App, area: Rect) {
     ]);
     let name = if app.title.is_empty() { trunc(&app.task, 48) } else { trunc(&app.title, 48) };
     let right = Line::from(span(format!(" {name} "), SOFT)).right_aligned();
-    let foot = Line::from(span(" q quit · o open page · f fx ", FAINT)).right_aligned();
-    let block = Block::bordered()
-        .border_type(BorderType::Thick)
-        .border_style(st(bc))
-        .title(title)
-        .title_top(right)
-        .title_bottom(foot);
+    let url = app.server.clone().unwrap_or_default();
+    let foot = Line::from(vec![span(" ⌁ ", CYAN), span(format!("{url} "), MUTED)]).right_aligned();
+    let block = Block::bordered().border_type(BorderType::Thick).border_style(st(bc)).title(title).title_top(right).title_bottom(foot);
     let inner = block.inner(area);
     f.render_widget(block, area);
     if inner.height < 2 || inner.width < 10 {
@@ -695,9 +749,14 @@ fn draw_lead(f: &mut Frame, app: &App, area: Rect) {
     }
     let row = |y: u16| Rect { x: inner.x, y, width: inner.width, height: 1 };
     f.render_widget(lead_status(app), row(inner.y));
-    let sub = if app.phase == Phase::Ship {
-        Line::from(vec![span("⎿ ", GREEN), span("index.html assembled · press ", SOFT), bold("o", GOLD), span(" to open it", SOFT)])
-    } else if app.phase == Phase::Build && !a.working() {
+    let sub = if app.phase == Phase::Ship && !app.busy() {
+        Line::from(vec![
+            span("⎿ ", GREEN),
+            span("page is live · ", SOFT),
+            bold("ctrl-o", GOLD),
+            span(" opens it · type below to keep changing it", SOFT),
+        ])
+    } else if !a.working() && app.busy() {
         let active = app.agents.iter().filter(|w| w.working()).count();
         Line::from(span(
             format!("⎿ {active} agents working · {} messages relayed · {} files on disk", app.msg_count, app.files.len()),
@@ -728,11 +787,15 @@ fn draw_lead(f: &mut Frame, app: &App, area: Rect) {
     }
 }
 
+/// A packet on the mesh: its fading tail, its head, its color.
+type Trail = (Vec<(f64, f64)>, (f64, f64), Color);
+
 fn draw_mesh(f: &mut Frame, app: &App, area: Rect) {
-    let block = Block::bordered()
-        .border_type(BorderType::Rounded)
-        .border_style(st(FAINT))
-        .title(Line::from(vec![span(" ◈ ", CYAN), bold("MESH", TEXT), span(" · live comms ", MUTED)]));
+    let block = Block::bordered().border_type(BorderType::Rounded).border_style(st(FAINT)).title(Line::from(vec![
+        span(" ◈ ", CYAN),
+        bold("MESH", TEXT),
+        span(" · live comms ", MUTED),
+    ]));
     let inner = block.inner(area);
     f.render_widget(block, area);
     if inner.width < 12 || inner.height < 5 {
@@ -752,7 +815,7 @@ fn draw_mesh(f: &mut Frame, app: &App, area: Rect) {
             }
         })
         .collect();
-    let trails: Vec<(Vec<(f64, f64)>, (f64, f64), Color)> = app
+    let trails: Vec<Trail> = app
         .packets
         .iter()
         .filter(|p| p.from < n && p.to < n)
@@ -769,58 +832,54 @@ fn draw_mesh(f: &mut Frame, app: &App, area: Rect) {
     let agents = &app.agents;
     let cell_w = 2.0 * xr / inner.width as f64;
     let pulse = |i: usize| 0.5 + 0.5 * (t * 4.0 + i as f64).sin();
-    let canvas = Canvas::default()
-        .marker(Marker::Braille)
-        .x_bounds([-xr, xr])
-        .y_bounds([-yr, yr])
-        .paint(|ctx| {
-            for i in 1..n {
-                let a = &agents[i];
-                let (x, y) = nodes[i];
-                let c = if a.working() {
-                    lerp(dim(a.color, 0.25), a.color, pulse(i) as f32 * 0.6)
-                } else if a.state == AState::Done {
-                    dim(GREEN, 0.45)
-                } else {
-                    FAINT
-                };
-                ctx.draw(&CanvasLine { x1: 0.0, y1: 0.0, x2: x, y2: y, color: c });
-                if n > 3 {
-                    let j = if i + 1 < n { i + 1 } else { 1 };
-                    let (x2, y2) = nodes[j];
-                    ctx.draw(&CanvasLine { x1: x, y1: y, x2, y2, color: Color::Rgb(42, 42, 60) });
-                }
+    let canvas = Canvas::default().marker(Marker::Braille).x_bounds([-xr, xr]).y_bounds([-yr, yr]).paint(|ctx| {
+        for i in 1..n {
+            let a = &agents[i];
+            let (x, y) = nodes[i];
+            let c = if a.working() {
+                lerp(dim(a.color, 0.25), a.color, pulse(i) as f32 * 0.6)
+            } else if a.state == AState::Done {
+                dim(GREEN, 0.45)
+            } else {
+                FAINT
+            };
+            ctx.draw(&CanvasLine { x1: 0.0, y1: 0.0, x2: x, y2: y, color: c });
+            if n > 3 {
+                let j = if i + 1 < n { i + 1 } else { 1 };
+                let (x2, y2) = nodes[j];
+                ctx.draw(&CanvasLine { x1: x, y1: y, x2, y2, color: Color::Rgb(42, 42, 60) });
             }
-            ctx.layer();
-            for (trail, head, c) in &trails {
-                ctx.draw(&Points { coords: trail, color: dim(*c, 0.7) });
-                ctx.draw(&Circle { x: head.0, y: head.1, radius: 0.05, color: *c });
-                ctx.draw(&Points { coords: &[*head], color: WHITE });
+        }
+        ctx.layer();
+        for (trail, head, c) in &trails {
+            ctx.draw(&Points { coords: trail, color: dim(*c, 0.7) });
+            ctx.draw(&Circle { x: head.0, y: head.1, radius: 0.05, color: *c });
+            ctx.draw(&Points { coords: &[*head], color: WHITE });
+        }
+        ctx.layer();
+        for i in 0..n {
+            let a = &agents[i];
+            let (x, y) = nodes[i];
+            let c = match a.state {
+                AState::Done => GREEN,
+                AState::Failed => RED,
+                AState::Queued if i != 0 => FAINT,
+                _ => a.color,
+            };
+            let r = if i == 0 { 0.13 } else { 0.07 } + if a.working() { 0.03 * pulse(i) } else { 0.0 };
+            ctx.draw(&Circle { x, y, radius: r, color: c });
+            if i == 0 {
+                ctx.draw(&Circle { x, y, radius: r * 0.5, color: c });
             }
-            ctx.layer();
-            for i in 0..n {
-                let a = &agents[i];
-                let (x, y) = nodes[i];
-                let c = match a.state {
-                    AState::Done => GREEN,
-                    AState::Failed => RED,
-                    AState::Queued if i != 0 => FAINT,
-                    _ => a.color,
-                };
-                let r = if i == 0 { 0.13 } else { 0.07 } + if a.working() { 0.03 * pulse(i) } else { 0.0 };
-                ctx.draw(&Circle { x, y, radius: r, color: c });
-                if i == 0 {
-                    ctx.draw(&Circle { x, y, radius: r * 0.5, color: c });
-                }
-            }
-            for i in 0..n {
-                let a = &agents[i];
-                let (x, y) = nodes[i];
-                let label = if i == 0 { format!("★ {}", a.spec.name) } else { a.spec.name.clone() };
-                let lx = if x < -0.1 { x - 0.14 - label.chars().count() as f64 * cell_w } else { x + 0.14 };
-                ctx.print(lx, y, Line::from(bold(label, a.color)));
-            }
-        });
+        }
+        for i in 0..n {
+            let a = &agents[i];
+            let (x, y) = nodes[i];
+            let label = if i == 0 { format!("★ {}", a.spec.name) } else { a.spec.name.clone() };
+            let lx = if x < -0.1 { x - 0.14 - label.chars().count() as f64 * cell_w } else { x + 0.14 };
+            ctx.print(lx, y, Line::from(bold(label, a.color)));
+        }
+    });
     f.render_widget(canvas, inner);
 }
 
@@ -838,26 +897,24 @@ fn draw_card(f: &mut Frame, app: &App, i: usize, area: Rect) {
         AState::Queued => "○".to_string(),
         _ => fx::SPINNER[(app.frame as usize / 2 + i) % fx::SPINNER.len()].to_string(),
     };
+    let sel = app.selected == Some(i);
     let title = Line::from(vec![
-        span(" ", bc),
+        if sel { bold(" ▶ ", WHITE) } else { span(" ", bc) },
         bold(dot, bc),
         span(" ", bc),
         bold(a.spec.name.clone(), a.color),
         span(format!(" ─ {} {} ", a.spec.provider.label(), a.spec.model_label()), MUTED),
     ]);
-    let role = if a.role.is_empty() { "…".to_string() } else { format!("#{}", a.role) };
-    let role_t = Line::from(Span::styled(
-        format!(" {role} "),
-        Style::new().fg(Color::Black).bg(dim(a.color, 0.9)).add_modifier(Modifier::BOLD),
-    ))
-    .right_aligned();
-    let foot = Line::from(span(format!(" ⚒ {} tools · ✎ {} files ", a.tools_used, a.files), MUTED)).right_aligned();
-    let block = Block::bordered()
-        .border_type(bt)
-        .border_style(st(bc))
-        .title(title)
-        .title_top(role_t)
-        .title_bottom(foot);
+    let role = if a.role.is_empty() { "no section".to_string() } else { a.role.clone() };
+    let role_t =
+        Line::from(Span::styled(format!(" {role} "), Style::new().fg(Color::Black).bg(dim(a.color, 0.9)).add_modifier(Modifier::BOLD)))
+            .right_aligned();
+    let foot = if sel {
+        Line::from(vec![span(" enter ", GOLD), span("zoom · ", MUTED), span("type ", GOLD), span("to message ", MUTED)]).right_aligned()
+    } else {
+        Line::from(span(format!(" ⚒ {} tools · ✎ {} files ", a.tools_used, a.files), MUTED)).right_aligned()
+    };
+    let block = Block::bordered().border_type(bt).border_style(st(bc)).title(title).title_top(role_t).title_bottom(foot);
     let inner = block.inner(area);
     f.render_widget(block, area);
     if inner.height < 2 || inner.width < 10 {
@@ -891,10 +948,11 @@ fn draw_card(f: &mut Frame, app: &App, i: usize, area: Rect) {
 }
 
 fn panel(title: &str, icon: &str, icon_c: Color, extra: String) -> Block<'static> {
-    Block::bordered()
-        .border_type(BorderType::Rounded)
-        .border_style(st(FAINT))
-        .title(Line::from(vec![span(format!(" {icon} "), icon_c), bold(title.to_string(), TEXT), span(format!("{extra} "), MUTED)]))
+    Block::bordered().border_type(BorderType::Rounded).border_style(st(FAINT)).title(Line::from(vec![
+        span(format!(" {icon} "), icon_c),
+        bold(title.to_string(), TEXT),
+        span(format!("{extra} "), MUTED),
+    ]))
 }
 
 fn draw_events(f: &mut Frame, app: &App, area: Rect) {
@@ -979,6 +1037,9 @@ fn color_of(app: &App, name: &str) -> Color {
     if name.eq_ignore_ascii_case("all") {
         return GOLD;
     }
+    if name == "you" {
+        return WHITE;
+    }
     app.agent_index(name).map(|i| app.agents[i].color).unwrap_or(MUTED)
 }
 
@@ -1024,10 +1085,11 @@ fn draw_bubbles(f: &mut Frame, app: &App) {
         let fc = color_of(app, from);
         let fade = if age > 3.6 { (1.0 - (age - 3.6) / 0.9).max(0.25) } else { 1.0 };
         f.render_widget(Clear, rect);
-        let block = Block::bordered()
-            .border_type(BorderType::Rounded)
-            .border_style(st(dim(fc, fade)))
-            .title(Line::from(vec![span(" ✉ ", fc), bold(from.clone(), dim(fc, fade)), span(" ", fc)]));
+        let block = Block::bordered().border_type(BorderType::Rounded).border_style(st(dim(fc, fade))).title(Line::from(vec![
+            span(" ✉ ", fc),
+            bold(from.clone(), dim(fc, fade)),
+            span(" ", fc),
+        ]));
         let body: Vec<Line> = lines.into_iter().map(|l| Line::from(span(l, dim(TEXT, fade)))).collect();
         f.render_widget(Paragraph::new(body).block(block), rect);
     }
@@ -1181,7 +1243,7 @@ fn draw_boot(f: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_ship(f: &mut Frame, app: &App, area: Rect) {
-    let Some(at) = app.shipped else { return };
+    let Some(at) = app.shipped_at else { return };
     let age = at.elapsed().as_secs_f32();
     if age < 0.6 {
         return;
@@ -1208,9 +1270,10 @@ fn draw_ship(f: &mut Frame, app: &App, area: Rect) {
         app.msg_count,
         app.total_cost()
     );
-    let path = app.dir.join("index.html").display().to_string();
-    let hint = "o  open in browser     ·     q  quit";
-    let box_w = (bw.max(stats.chars().count() as u16).max(path.chars().count() as u16) + 8).min(area.width);
+    let path = app.page_target();
+    let hint = "ctrl-o open it  ·  type below to change anything  ·  any key to continue";
+    let box_w =
+        (bw.max(stats.chars().count() as u16).max(path.chars().count() as u16).max(hint.chars().count() as u16) + 8).min(area.width);
     let box_h = 13.min(area.height);
     let r = Rect {
         x: area.x + area.width.saturating_sub(box_w) / 2,
@@ -1219,10 +1282,7 @@ fn draw_ship(f: &mut Frame, app: &App, area: Rect) {
         height: box_h,
     };
     f.render_widget(Clear, r);
-    f.render_widget(
-        Block::bordered().border_type(BorderType::Double).border_style(st(hsv(app.t * 120.0, 0.7, 1.0))),
-        r,
-    );
+    f.render_widget(Block::bordered().border_type(BorderType::Double).border_style(st(hsv(app.t * 120.0, 0.7, 1.0))), r);
     let buf = f.buffer_mut();
     let x0 = r.x + r.width.saturating_sub(bw) / 2;
     let y0 = r.y + 1;
@@ -1240,4 +1300,283 @@ fn draw_ship(f: &mut Frame, app: &App, area: Rect) {
     centered(buf, r, y0 + 7, &Line::from(bold(stats, TEXT)));
     centered(buf, r, y0 + 8, &Line::from(span(path, MUTED)));
     centered(buf, r, y0 + 10, &Line::from(bold(hint, GOLD)));
+}
+
+// ── command bar and overlays ─────────────────────────────────────────────────────────────
+
+fn draw_input(f: &mut Frame, app: &App, area: Rect) {
+    let target = app.target();
+    let tc = color_of(app, &target);
+    let typing = !app.input.is_empty();
+    let bc = if typing { lerp(dim(CYAN, 0.5), CYAN, 0.5 + 0.5 * (app.t * 3.0).sin()) } else { dim(CYAN, 0.45) };
+    let is_cmd = app.input.starts_with('/');
+    let who = if is_cmd {
+        Span::styled(" ⌘ command ", Style::new().fg(Color::Black).bg(PURPLE).add_modifier(Modifier::BOLD))
+    } else {
+        let lead = app.agents[0].spec.name == target;
+        let label = if lead { format!(" → {target} (lead) ") } else { format!(" → {target} ") };
+        Span::styled(label, Style::new().fg(Color::Black).bg(tc).add_modifier(Modifier::BOLD))
+    };
+    let block = Block::bordered()
+        .border_type(BorderType::Rounded)
+        .border_style(st(bc))
+        .title(Line::from(vec![span(" ⌨ ", CYAN), bold("TALK TO THE SWARM", TEXT), span(" ", FAINT), who, span(" ", FAINT)]))
+        .title_bottom(
+            Line::from(vec![
+                span(" tab ", GOLD),
+                span("select agent · ", MUTED),
+                span("@name ", GOLD),
+                span("DM · ", MUTED),
+                span("/ ", GOLD),
+                span("commands · ", MUTED),
+                span("F1 ", GOLD),
+                span("help · ", MUTED),
+                span("ctrl-c ", GOLD),
+                span("quit ", MUTED),
+            ])
+            .right_aligned(),
+        );
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+    if inner.width < 6 {
+        return;
+    }
+    let w = inner.width as usize - 3;
+    let mut spans = vec![bold("› ", CYAN)];
+    if !typing {
+        if (app.frame / 15).is_multiple_of(2) {
+            spans.push(Span::styled("▌", st(CYAN)));
+        } else {
+            spans.push(span(" ", FAINT));
+        }
+        let to_lead = app.agents[0].spec.name == target;
+        let text = if !to_lead {
+            format!("message {target} directly; it edits its own section and replies · esc to talk to the lead")
+        } else if app.busy() {
+            format!("tell {target} anything, even mid-build · @name to DM one agent · /help")
+        } else {
+            format!("what should change? {target} will route it to the team · @name to DM · /help")
+        };
+        let hint = if app.over_budget() {
+            span(format!("budget cap hit · /budget <usd> to raise it (spent ${:.2})", app.spent()), RED)
+        } else {
+            Span::styled(text, st(FAINT).add_modifier(Modifier::ITALIC))
+        };
+        spans.push(hint);
+    } else {
+        let chars: Vec<char> = app.input.chars().collect();
+        let start = app.cursor.saturating_sub(w.saturating_sub(1));
+        let end = (start + w).min(chars.len());
+        let text_c = if is_cmd { PURPLE } else { WHITE };
+        for (i, ch) in chars[start..end].iter().enumerate() {
+            let at = start + i;
+            let s = ch.to_string();
+            if at == app.cursor && (app.frame / 15).is_multiple_of(2) {
+                spans.push(Span::styled(s, Style::new().fg(Color::Black).bg(CYAN)));
+            } else if i == 0 && start == 0 && *ch == '@' || (at > 0 && chars[..at].iter().all(|c| !c.is_whitespace()) && chars[0] == '@') {
+                spans.push(bold(s, tc));
+            } else {
+                spans.push(span(s, text_c));
+            }
+        }
+        if app.cursor >= end && (app.frame / 15).is_multiple_of(2) {
+            spans.push(Span::styled(" ", Style::new().bg(CYAN)));
+        }
+    }
+    f.render_widget(Line::from(spans), Rect { height: 1, ..inner });
+}
+
+fn draw_suggestions(f: &mut Frame, app: &App, input: Rect) {
+    let s = app.suggestions();
+    if s.is_empty() {
+        return;
+    }
+    let shown: Vec<&(String, String)> = s.iter().take(7).collect();
+    let w =
+        shown.iter().map(|(c, d)| c.chars().count() + d.chars().count() + 4).max().unwrap_or(10).min(input.width as usize - 4) as u16 + 2;
+    let h = shown.len() as u16 + 2;
+    let r = Rect { x: input.x + 2, y: input.y.saturating_sub(h), width: w, height: h };
+    f.render_widget(Clear, r);
+    let block = Block::bordered().border_type(BorderType::Rounded).border_style(st(PURPLE)).title(Line::from(span(" tab ↹ ", MUTED)));
+    let inner = block.inner(r);
+    f.render_widget(block, r);
+    let sel = app.sugg_sel.min(s.len() - 1);
+    let lines: Vec<Line> = shown
+        .iter()
+        .enumerate()
+        .map(|(i, (c, d))| {
+            let on = i == sel;
+            let style = if on { Style::new().fg(Color::Black).bg(PURPLE).add_modifier(Modifier::BOLD) } else { st(TEXT) };
+            Line::from(vec![Span::styled(format!(" {} ", c.trim_end()), style), span(format!(" {d}"), MUTED)])
+        })
+        .collect();
+    f.render_widget(Paragraph::new(lines), inner);
+}
+
+fn draw_reply(f: &mut Frame, app: &App, input: Rect) {
+    let Some((from, text, at)) = &app.reply else { return };
+    let age = at.elapsed().as_secs_f32();
+    let maxw = (input.width as usize).saturating_sub(8).min(84);
+    if maxw < 20 {
+        return;
+    }
+    let lines: Vec<String> = wrap_words(text, maxw - 2).into_iter().take(5).collect();
+    let w = lines.iter().map(|l| l.chars().count()).max().unwrap_or(10).max(from.chars().count() + 12) as u16 + 4;
+    let h = lines.len() as u16 + 2;
+    let grow = (age / 0.2).min(1.0);
+    let w = ((w as f32) * grow).max(8.0) as u16;
+    let r = Rect { x: input.right().saturating_sub(w + 2), y: input.y.saturating_sub(h), width: w, height: h };
+    let fc = color_of(app, from);
+    let fade = if age > 10.0 { (1.0 - (age - 10.0) / 2.0).max(0.3) } else { 1.0 };
+    f.render_widget(Clear, r);
+    let block = Block::bordered().border_type(BorderType::Rounded).border_style(st(dim(fc, fade))).title(Line::from(vec![
+        span(" ✉ ", fc),
+        bold(from.clone(), dim(fc, fade)),
+        span(" → you ", MUTED),
+    ]));
+    let body: Vec<Line> = lines.into_iter().map(|l| Line::from(span(l, dim(WHITE, fade)))).collect();
+    f.render_widget(Paragraph::new(body).block(block), r);
+}
+
+fn draw_toast(f: &mut Frame, app: &App, area: Rect) {
+    let Some((text, lvl, at)) = &app.toast else { return };
+    let c = match lvl {
+        Level::Good => GREEN,
+        Level::Warn => AMBER,
+        Level::Bad => RED,
+        Level::Msg => CYAN,
+        Level::Info => CYAN,
+    };
+    let age = at.elapsed().as_secs_f32();
+    let w = (text.chars().count() as u16 + 4).min(area.width.saturating_sub(4));
+    let slide = ((age / 0.18).min(1.0) * w as f32) as u16;
+    let r = Rect { x: area.right().saturating_sub(slide + 1), y: area.y + 1, width: slide.max(1), height: 3 };
+    f.render_widget(Clear, r);
+    let block = Block::bordered().border_type(BorderType::Rounded).border_style(st(c));
+    f.render_widget(Paragraph::new(Line::from(bold(trunc(text, w as usize - 2), c))).block(block), r);
+}
+
+fn draw_zoom(f: &mut Frame, app: &App, i: usize, area: Rect) {
+    let a = &app.agents[i];
+    let bc = border_color(app, i);
+    let session = a.session.as_deref().map(|s| format!(" · session {}", &s[..s.len().min(8)])).unwrap_or_default();
+    let role = if i == 0 {
+        "lead".to_string()
+    } else if a.role.is_empty() {
+        "no section".to_string()
+    } else {
+        a.role.clone()
+    };
+    let block = Block::bordered()
+        .border_type(BorderType::Thick)
+        .border_style(st(bc))
+        .title(Line::from(vec![
+            bold(" ▶ ", WHITE),
+            bold(a.spec.name.clone(), a.color),
+            span(format!(" ─ {} {} · {role}{session} ", a.spec.provider.label(), a.spec.model_label()), MUTED),
+        ]))
+        .title_bottom(
+            Line::from(vec![
+                span(" pgup/pgdn ", GOLD),
+                span("scroll · ", MUTED),
+                span("esc ", GOLD),
+                span("back · ", MUTED),
+                span("type ", GOLD),
+                span("to message ", MUTED),
+            ])
+            .right_aligned(),
+        );
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+    if inner.width < 20 || inner.height < 4 {
+        return;
+    }
+    let side_w = if inner.width >= 90 { 34 } else { 0 };
+    let [log_r, gap, side] =
+        Layout::horizontal([Constraint::Min(10), Constraint::Length(if side_w > 0 { 2 } else { 0 }), Constraint::Length(side_w)])
+            .areas(inner);
+    let row = |y: u16| Rect { x: log_r.x, y, width: log_r.width, height: 1 };
+    f.render_widget(status_line(app, i), row(log_r.y));
+    f.render_widget(tool_line(app, i), row(log_r.y + 1));
+    let body = Rect { x: log_r.x, y: log_r.y + 2, width: log_r.width, height: log_r.height.saturating_sub(2) };
+    let max_skip = a.lines.len().saturating_mul(2);
+    f.render_widget(Paragraph::new(stream_lines_at(app, a, body.width as usize, body.height as usize, app.scroll.min(max_skip))), body);
+    if app.scroll > 0 {
+        let tag = format!(" ↑ scrolled {} ", app.scroll);
+        f.render_widget(Line::from(Span::styled(tag, Style::new().fg(Color::Black).bg(AMBER))).right_aligned(), Rect { height: 1, ..body });
+    }
+    if side_w == 0 {
+        return;
+    }
+    let buf = f.buffer_mut();
+    for y in gap.top()..gap.bottom() {
+        put(buf, gap.x, y, '│', FAINT);
+    }
+    let stat = |k: &str, v: String, c: Color| Line::from(vec![span(format!("{k:<10}"), MUTED), bold(v, c)]);
+    let mut lines = vec![
+        Line::from(bold("STATS", TEXT)),
+        stat("turns", a.turns.to_string(), TEXT),
+        stat("tokens", fmt_k(a.tokens), TEXT),
+        stat("cost", format!("${:.3}", a.cost), GREEN),
+        stat("tools", a.tools_used.to_string(), TEXT),
+        stat("writes", a.files.to_string(), TEXT),
+        Line::default(),
+        Line::from(bold("OWNS", TEXT)),
+    ];
+    let owned: Vec<&crate::app::PlanItem> = app.plan.iter().filter(|p| p.agent == a.spec.name).collect();
+    if owned.is_empty() {
+        lines.push(Line::from(span(if i == 0 { "styles/base.css · the plan" } else { "nothing yet" }, MUTED)));
+    }
+    for p in owned {
+        lines.push(Line::from(vec![bold(format!("#{} ", p.id), a.color)]));
+        for l in wrap_words(&p.brief, side.width as usize - 2).into_iter().take(3) {
+            lines.push(Line::from(span(format!(" {l}"), FAINT)));
+        }
+    }
+    lines.push(Line::default());
+    lines.push(Line::from(bold("COMMS", TEXT)));
+    let name = &a.spec.name;
+    let mine: Vec<&(String, String, String)> = app.comms.iter().filter(|(fr, to, _)| fr == name || to == name || to == "all").collect();
+    let room = (side.height as usize).saturating_sub(lines.len());
+    for (fr, to, text) in mine.iter().rev().take(room / 2).rev() {
+        lines.push(Line::from(vec![bold(fr.clone(), color_of(app, fr)), span(" ➜ ", FAINT), bold(to.clone(), color_of(app, to))]));
+        lines.push(Line::from(span(format!(" {}", trunc(text, side.width as usize - 2)), SOFT)));
+    }
+    f.render_widget(Paragraph::new(lines), side);
+}
+
+fn draw_help(f: &mut Frame, app: &App, area: Rect) {
+    let lead = app.agents[0].spec.name.clone();
+    let k = |key: &str, d: &str| Line::from(vec![bold(format!("  {key:<16}"), GOLD), span(d.to_string(), SOFT)]);
+    let mut lines = vec![
+        Line::from(bold(" TALKING TO THE SWARM", CYAN)),
+        k("just type", &format!("message {lead} (the lead): it answers and hands out the work")),
+        k("@name text", "DM one agent; it edits its own section and replies"),
+        k("@all text", "message every worker at once"),
+        k("tab / shift-tab", "select an agent; typed messages then go to it"),
+        k("enter (empty)", "zoom into the selected agent's full log"),
+        k("pgup / pgdn", "scroll the zoomed log"),
+        k("↑ ↓", "message history, or pick a suggestion"),
+        k("esc", "clear input · leave zoom · deselect"),
+        k("ctrl-o", "open the live page in your browser"),
+        k("ctrl-f", "toggle heavy effects"),
+        k("ctrl-c", "quit (twice if agents are busy); the project can be resumed"),
+        Line::default(),
+        Line::from(bold(" COMMANDS", PURPLE)),
+    ];
+    for (c, d) in COMMANDS {
+        lines.push(k(c, d));
+    }
+    lines.push(Line::default());
+    lines.push(Line::from(span("  any key closes this", FAINT)));
+    let w = 84.min(area.width.saturating_sub(2));
+    let h = (lines.len() as u16 + 2).min(area.height);
+    let r = Rect { x: area.x + area.width.saturating_sub(w) / 2, y: area.y + area.height.saturating_sub(h) / 2, width: w, height: h };
+    f.render_widget(Clear, r);
+    let block = Block::bordered().border_type(BorderType::Double).border_style(st(hsv(app.t * 60.0, 0.6, 1.0))).title(Line::from(vec![
+        span(" ? ", GOLD),
+        bold("HELP", TEXT),
+        span(" ", FAINT),
+    ]));
+    f.render_widget(Paragraph::new(lines).block(block), r);
 }
