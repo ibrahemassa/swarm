@@ -55,6 +55,8 @@ saved, and `swarm -c` picks up where you left off.
   Claude-reported spend crosses it, everyone stops.
 - **Resume anything**: `.swarm/state.json` keeps the plan, the roster and every agent's session id.
 - **Demo mode**: scripted agents, real animations, real files, zero tokens. Good for screen recordings.
+  `swarm --demo` builds a sample page; `swarm --demo --code` builds a small Rust CLI, fails its first `cargo test`
+  and fixes it.
 - **A dashboard that looks unreasonably busy**: code typed out live with syntax highlighting (hex colors render
   in their own color), matrix rain while agents think, message packets flying between cards, a live comms mesh,
   token-rate sparklines, a boot sequence, and fireworks when a round ships.
@@ -88,6 +90,7 @@ Developed and tested on Linux; macOS should work (it opens the browser with `ope
 ```sh
 swarm                                   # open the launcher
 swarm --demo                            # the show, zero tokens
+swarm --demo --code                     # the code-mode show: build, fail a test, fix it, ship
 swarm "landing page for a neon ramen bar"
 swarm "portfolio for a tattoo artist" --claude 5 --agy 2 --codex 3 --live
 swarm -c                                # resume the last project
@@ -103,6 +106,12 @@ swarm --code -o ~/code/myapp "add dark mode to the settings screen, with tests"
 
 Pick **CODE PROJECT** in the launcher, or pass `--code`. Point `-o` at an empty folder to start something new, or at
 an existing repo to change it.
+
+<p align="center"><img src="docs/code-demo.gif" alt="Code mode: the lead writes a Rust skeleton, seven agents build their modules and tests, cargo test fails on escaped quotes, the lead routes the fix to the parser's owner, the re-check passes and the round ships" width="100%"></p>
+
+<sub>Above: `swarm --demo --code`. The agents are scripted, but the project they write is real: the failing test, the fix
+and the `cargo test` output are what the code actually does. The screenshots below are real runs on an existing
+Python repo.</sub>
 
 <p align="center"><img src="docs/code-build.png" alt="Code mode on an existing Python repo: two owners editing their files while the CHECK panel shows the last test run" width="100%"></p>
 

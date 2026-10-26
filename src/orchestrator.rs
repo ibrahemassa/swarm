@@ -299,15 +299,14 @@ pub fn version(p: Provider) -> Option<String> {
         return None;
     }
     let s = String::from_utf8_lossy(&o.stdout);
-    Some(
-        s.lines()
-            .next()
-            .unwrap_or("")
-            .split_whitespace()
-            .find(|w| w.chars().next().is_some_and(|c| c.is_ascii_digit()))
-            .unwrap_or("?")
-            .to_string(),
-    )
+    // the first "1.2.3"-looking word anywhere; some CLIs print warnings before their version
+    let v = s
+        .split_whitespace()
+        .find(|w| w.chars().next().is_some_and(|c| c.is_ascii_digit()) && w.contains('.'))
+        .unwrap_or("?")
+        .trim_end_matches([',', ')'])
+        .to_string();
+    Some(v)
 }
 
 pub fn log(tx: &Tx, l: Level, s: impl Into<String>) {

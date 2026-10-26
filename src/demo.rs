@@ -14,6 +14,7 @@ use tokio::time::sleep;
 use crate::app::{AgentEv, Ev, Level, Phase, PlanItem};
 use crate::fx::Rng;
 use crate::orchestrator::{self, msg, name_word, Cmd, Config, Page, Shared, Tx};
+use crate::project::Kind;
 use crate::providers::AgentSpec;
 
 pub const TASK: &str = "landing page for NOODLE//NOIR, a neon late-night ramen bar";
@@ -266,23 +267,23 @@ const LEAD_PINGS: &[&str] = &[
     "nice pace, ship small and clean",
 ];
 
-fn ms(x: f32) -> Duration {
+pub(crate) fn ms(x: f32) -> Duration {
     Duration::from_millis(x.max(0.0) as u64)
 }
 
-fn send(tx: &Tx, idx: usize, ev: AgentEv) {
+pub(crate) fn send(tx: &Tx, idx: usize, ev: AgentEv) {
     let _ = tx.send(Ev::Agent(idx, ev));
 }
 
 #[derive(Clone, Copy)]
-enum Out {
+pub(crate) enum Out {
     Text,
     Thinking,
     Code,
 }
 
 /// Dribble text out in small irregular chunks, like a model streaming tokens.
-async fn stream(tx: &Tx, idx: usize, kind: Out, text: &str, cps: f32, rng: &mut Rng, tokens: &mut u64) {
+pub(crate) async fn stream(tx: &Tx, idx: usize, kind: Out, text: &str, cps: f32, rng: &mut Rng, tokens: &mut u64) {
     let chars: Vec<char> = text.chars().collect();
     let mut i = 0;
     while i < chars.len() {
@@ -307,14 +308,14 @@ async fn stream(tx: &Tx, idx: usize, kind: Out, text: &str, cps: f32, rng: &mut 
     }
 }
 
-async fn quick_tool(tx: &Tx, idx: usize, name: &str, detail: &str, wait: f32) {
+pub(crate) async fn quick_tool(tx: &Tx, idx: usize, name: &str, detail: &str, wait: f32) {
     send(tx, idx, AgentEv::ToolStart(name.into()));
     send(tx, idx, AgentEv::ToolDetail(detail.into()));
     sleep(ms(wait)).await;
     send(tx, idx, AgentEv::ToolDone(false));
 }
 
-async fn write_file(tx: &Tx, idx: usize, dir: &Path, rel: &str, body: &str, cps: f32, rng: &mut Rng, tokens: &mut u64) {
+pub(crate) async fn write_file(tx: &Tx, idx: usize, dir: &Path, rel: &str, body: &str, cps: f32, rng: &mut Rng, tokens: &mut u64) {
     send(tx, idx, AgentEv::ToolStart("Write".into()));
     send(tx, idx, AgentEv::ToolDetail(rel.into()));
     sleep(ms(rng.range(250.0, 600.0))).await;
@@ -427,18 +428,26 @@ const LEAD_ROUTES: &[&str] = &[
 
 /// A follow-up turn: think, read the file, make a (harmless, real) edit, report back.
 #[allow(clippy::too_many_arguments)]
-async fn task(idx: usize, name: String, reply_to: String, label: String, ask: String, id: Option<String>, dir: PathBuf, tx: Tx, seed: u64) {
+async fn task(
+    idx: usize,
+    name: String,
+    reply_to: String,
+    label: String,
+    ask: String,
+    target: Option<Target>,
+    dir: PathBuf,
+    tx: Tx,
+    seed: u64,
+) {
     let mut rng = Rng::new(seed);
     let mut tokens = 0u64;
     send(&tx, idx, AgentEv::Turn(label));
     send(&tx, idx, AgentEv::Start);
     sleep(ms(rng.range(700.0, 1600.0))).await;
     stream(&tx, idx, Out::Thinking, &format!("Ask: \"{ask}\"\n{}", rng.pick(TASK_THINK)), 50.0, &mut rng, &mut tokens).await;
-    let reply = match id {
-        Some(id) => {
-            quick_tool(&tx, idx, "Read", &format!("sections/{id}.html"), rng.range(600.0, 1200.0)).await;
-            let rel = format!("styles/{id}.css");
-            let note = format!("\n/* request: {} */\n#{id} {{ scroll-margin-top: 24px; }}\n", ask.replace("*/", "* /"));
+    let reply = match target {
+        Some(Target { read, rel, note }) => {
+            quick_tool(&tx, idx, "Read", &read, rng.range(600.0, 1200.0)).await;
             send(&tx, idx, AgentEv::ToolStart("Edit".into()));
             send(&tx, idx, AgentEv::ToolDetail(rel.clone()));
             sleep(ms(rng.range(300.0, 700.0))).await;
@@ -448,7 +457,7 @@ async fn task(idx: usize, name: String, reply_to: String, label: String, ask: St
             send(&tx, idx, AgentEv::ToolDone(false));
             rng.pick(TASK_DONE).to_string()
         }
-        None => "I don't own a section yet, ask the lead to give me one.".to_string(),
+        None => "I don't own anything yet, ask the lead to give me some work.".to_string(),
     };
     stream(&tx, idx, Out::Text, &format!("{reply}\n"), 110.0, &mut rng, &mut tokens).await;
     msg(&tx, &name, &reply_to, reply.clone());
@@ -456,30 +465,71 @@ async fn task(idx: usize, name: String, reply_to: String, label: String, ask: St
     send(&tx, idx, AgentEv::Done(reply));
 }
 
-struct Demo {
-    cfg: Config,
-    tx: Tx,
-    rng: Rng,
-    names: Vec<String>,
-    items: Vec<PlanItem>,
-    round: u32,
-    in_round: bool,
-    work: JoinSet<usize>,
-    running: HashMap<usize, AbortHandle>,
-    pinging: Option<Arc<AtomicBool>>,
-    aborted: bool,
+/// Where a follow-up edit lands: the file to read first, the file to append to, and what to append.
+struct Target {
+    read: String,
+    rel: String,
+    note: String,
+}
+
+pub(crate) struct Demo {
+    pub(crate) cfg: Config,
+    pub(crate) tx: Tx,
+    pub(crate) rng: Rng,
+    pub(crate) names: Vec<String>,
+    pub(crate) items: Vec<PlanItem>,
+    pub(crate) round: u32,
+    pub(crate) in_round: bool,
+    pub(crate) work: JoinSet<usize>,
+    pub(crate) running: HashMap<usize, AbortHandle>,
+    pub(crate) pinging: Option<Arc<AtomicBool>>,
+    pub(crate) aborted: bool,
 }
 
 impl Demo {
-    fn lead(&self) -> String {
+    pub(crate) fn new(cfg: Config, tx: Tx, names: Vec<String>, items: Vec<PlanItem>) -> Demo {
+        Demo {
+            cfg,
+            tx,
+            rng: Rng::seeded(),
+            names,
+            items,
+            round: 1,
+            in_round: false,
+            work: JoinSet::new(),
+            running: HashMap::new(),
+            pinging: None,
+            aborted: false,
+        }
+    }
+
+    fn code(&self) -> bool {
+        self.cfg.kind == Kind::Code
+    }
+
+    pub(crate) fn lead(&self) -> String {
         self.names[0].clone()
     }
 
-    fn owned(&self, name: &str) -> Option<String> {
-        self.items.iter().find(|i| i.agent == name).map(|i| i.id.clone())
+    /// The file a follow-up edit for `name` goes into, with a harmless note that records the request.
+    fn target(&self, name: &str, ask: &str) -> Option<Target> {
+        let it = self.items.iter().find(|i| i.agent == name)?;
+        if !self.code() {
+            let id = &it.id;
+            let note = format!("\n/* request: {} */\n#{id} {{ scroll-margin-top: 24px; }}\n", ask.replace("*/", "* /"));
+            return Some(Target { read: format!("sections/{id}.html"), rel: format!("styles/{id}.css"), note });
+        }
+        let rel = it.owns.iter().find(|o| !o.contains('*'))?.clone();
+        let ask = ask.replace('\n', " ");
+        let note = match rel.rsplit('.').next().unwrap_or("") {
+            "md" | "html" => format!("\n<!-- request: {} -->\n", ask.replace("--", "-")),
+            "py" | "toml" | "sh" | "yml" | "yaml" | "csv" => format!("\n# request: {ask}\n"),
+            _ => format!("\n// request: {ask}\n"),
+        };
+        Some(Target { read: rel.clone(), rel, note })
     }
 
-    fn start_round(&mut self) {
+    pub(crate) fn start_round(&mut self) {
         if self.in_round {
             return;
         }
@@ -488,6 +538,7 @@ impl Demo {
         let flag = Arc::new(AtomicBool::new(false));
         self.pinging = Some(flag.clone());
         let (tx, lead) = (self.tx.clone(), self.lead());
+        let pings = if self.code() { crate::demo_code::LEAD_PINGS } else { LEAD_PINGS };
         tokio::spawn(async move {
             let mut rng = Rng::seeded();
             loop {
@@ -495,19 +546,19 @@ impl Demo {
                 if flag.load(Ordering::Relaxed) {
                     break;
                 }
-                msg(&tx, &lead, "all", *rng.pick(LEAD_PINGS));
+                msg(&tx, &lead, "all", *rng.pick(pings));
             }
         });
     }
 
     fn task(&mut self, idx: usize, reply_to: &str, label: String, ask: &str) {
         let name = self.names[idx].clone();
-        let id = self.owned(&name);
+        let target = self.target(&name, ask);
         let seed = self.rng.next();
         let h = self.work.spawn({
             let (reply_to, ask, dir, tx) = (reply_to.to_string(), ask.to_string(), self.cfg.dir.clone(), self.tx.clone());
             async move {
-                task(idx, name, reply_to, label, ask, id, dir, tx, seed).await;
+                task(idx, name, reply_to, label, ask, target, dir, tx, seed).await;
                 idx
             }
         });
@@ -537,7 +588,11 @@ impl Demo {
             v
         };
         let who = picks.iter().map(|i| self.names[*i].clone()).collect::<Vec<_>>().join(" and ");
-        let think = format!("User wants: \"{text}\".\nThat lands in {who}'s sections. Delegating, base.css stays as is.\n");
+        let think = if self.code() {
+            format!("User wants: \"{text}\".\nThat touches {who}'s files. Delegating; main.rs and the interfaces stay as they are.\n")
+        } else {
+            format!("User wants: \"{text}\".\nThat lands in {who}'s sections. Delegating, base.css stays as is.\n")
+        };
         stream(&self.tx, 0, Out::Thinking, &think, 70.0, &mut self.rng, &mut tokens).await;
         let reply = self.rng.pick(LEAD_ROUTES).to_string();
         stream(&self.tx, 0, Out::Text, &format!("{reply}\n"), 110.0, &mut self.rng, &mut tokens).await;
@@ -551,19 +606,24 @@ impl Demo {
         }
     }
 
-    fn ship(&mut self) {
+    pub(crate) fn ship(&mut self) {
         self.in_round = false;
         if let Some(f) = self.pinging.take() {
             f.store(true, Ordering::Relaxed);
         }
-        let page = Page { title: TITLE.into(), ids: self.items.iter().map(|i| i.id.clone()).collect(), placeholders: false };
-        orchestrator::assemble(&self.cfg.dir, &page);
+        if !self.code() {
+            let page = Page { title: TITLE.into(), ids: self.items.iter().map(|i| i.id.clone()).collect(), placeholders: false };
+            orchestrator::assemble(&self.cfg.dir, &page);
+        }
         let _ = self.tx.send(Ev::Phase(Phase::Ship));
         let _ = self.tx.send(Ev::Shipped(self.round));
         self.round += 1;
     }
 
-    async fn review(&mut self) {
+    pub(crate) async fn review(&mut self) {
+        if self.code() {
+            return crate::demo_code::review(self).await;
+        }
         let mut tokens = 0;
         let n = self.items.len();
         let _ = self.tx.send(Ev::Phase(Phase::Review));
@@ -620,7 +680,8 @@ impl Demo {
                 let spec = AgentSpec { name: format!("{word}-{k}"), provider: p, model };
                 let _ = self.tx.send(Ev::Spawn(spec.clone(), format!("joined the swarm ({} {})", p.label(), spec.model_label())));
                 self.names.push(spec.name.clone());
-                msg(&self.tx, &self.lead(), &spec.name, "welcome aboard. Stand by for a section.");
+                let what = if self.code() { "some files" } else { "a section" };
+                msg(&self.tx, &self.lead(), &spec.name, format!("welcome aboard. Stand by for {what}."));
             }
             Cmd::Stop(who) => {
                 let targets: Vec<usize> = match who.and_then(|w| self.names.iter().position(|n| n.eq_ignore_ascii_case(&w))) {
@@ -634,6 +695,9 @@ impl Demo {
                         send(&self.tx, i, AgentEv::Stopped);
                     }
                 }
+            }
+            Cmd::Check(_) if self.code() && !self.in_round => {
+                crate::demo_code::check(&self.tx, &self.cfg.dir, true, "check").await;
             }
             Cmd::Check(_) | Cmd::Run(_) => {
                 let _ = self.tx.send(Ev::Log(Level::Warn, "demo mode doesn't run commands".into()));
@@ -650,7 +714,10 @@ impl Demo {
 
 const TITLE: &str = "NOODLE//NOIR · ramen after hours";
 
-pub async fn run(cfg: Config, tx: Tx, mut cmds: UnboundedReceiver<Cmd>) {
+pub async fn run(cfg: Config, tx: Tx, cmds: UnboundedReceiver<Cmd>) {
+    if cfg.kind == Kind::Code {
+        return crate::demo_code::run(cfg, tx, cmds).await;
+    }
     let shared = Shared::default();
     *shared.names.lock().unwrap() = cfg.roster.iter().map(|s| s.name.clone()).collect();
     let url = crate::server::start(cfg.dir.clone(), shared.version.clone()).await;
@@ -705,19 +772,7 @@ pub async fn run(cfg: Config, tx: Tx, mut cmds: UnboundedReceiver<Cmd>) {
         sleep(ms(150.0)).await;
     }
 
-    let mut d = Demo {
-        cfg: cfg.clone(),
-        tx: tx.clone(),
-        rng: Rng::seeded(),
-        names: names.clone(),
-        items: items.clone(),
-        round: 1,
-        in_round: false,
-        work: JoinSet::new(),
-        running: HashMap::new(),
-        pinging: None,
-        aborted: false,
-    };
+    let mut d = Demo::new(cfg.clone(), tx.clone(), names.clone(), items.clone());
     d.start_round();
     if cfg.live {
         if let Some(u) = &url {
@@ -735,33 +790,53 @@ pub async fn run(cfg: Config, tx: Tx, mut cmds: UnboundedReceiver<Cmd>) {
         });
         d.running.insert(idx, h);
     }
-    let mut first = true;
+    d.serve(cmds, shared).await;
+}
 
-    loop {
-        tokio::select! {
-            c = cmds.recv() => match c {
-                Some(c) => d.command(c).await,
-                None => break,
-            },
-            Some(r) = d.work.join_next(), if !d.work.is_empty() => {
-                if let Ok(idx) = r {
-                    d.running.remove(&idx);
-                }
-                if d.work.is_empty() && d.in_round && d.aborted {
-                    d.aborted = false;
-                    d.in_round = false;
-                    if let Some(f) = d.pinging.take() {
-                        f.store(true, Ordering::Relaxed);
+impl Demo {
+    /// Play along with the command bar until the dashboard closes. The first round finishes with the
+    /// review (and, in code mode, the scripted check-and-fix); later rounds just ship.
+    pub(crate) async fn serve(mut self, mut cmds: UnboundedReceiver<Cmd>, shared: Shared) {
+        let mut first = true;
+        loop {
+            tokio::select! {
+                c = cmds.recv() => match c {
+                    Some(c) => self.command(c).await,
+                    None => break,
+                },
+                Some(r) = self.work.join_next(), if !self.work.is_empty() => {
+                    if let Ok(idx) = r {
+                        self.running.remove(&idx);
                     }
-                    let _ = tx.send(Ev::Phase(Phase::Ship));
-                    let _ = tx.send(Ev::Log(Level::Warn, "round stopped".into()));
-                } else if d.work.is_empty() && d.in_round {
-                    if first && cfg.review {
-                        d.review().await;
+                    if !self.work.is_empty() || !self.in_round {
+                        continue;
+                    }
+                    if self.aborted {
+                        self.aborted = false;
+                        self.in_round = false;
+                        if let Some(f) = self.pinging.take() {
+                            f.store(true, Ordering::Relaxed);
+                        }
+                        let _ = self.tx.send(Ev::Phase(Phase::Ship));
+                        let _ = self.tx.send(Ev::Log(Level::Warn, "round stopped".into()));
+                        continue;
+                    }
+                    if self.code() {
+                        if first {
+                            crate::demo_code::finish_first(&mut self).await;
+                        } else {
+                            crate::demo_code::check(&self.tx, &self.cfg.dir, true, "check").await;
+                            self.ship();
+                        }
+                    } else {
+                        if first && self.cfg.review {
+                            self.review().await;
+                        }
+                        let ids = self.items.iter().map(|i| i.id.clone()).collect();
+                        *shared.page.lock().unwrap() = Some(Page { title: TITLE.into(), ids, placeholders: false });
+                        self.ship();
                     }
                     first = false;
-                    *shared.page.lock().unwrap() = Some(Page { title: TITLE.into(), ids: d.items.iter().map(|i| i.id.clone()).collect(), placeholders: false });
-                    d.ship();
                 }
             }
         }

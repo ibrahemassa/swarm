@@ -386,7 +386,7 @@ impl Wizard {
     fn validate(&mut self) -> bool {
         if self.s.demo {
             if self.s.task.trim().is_empty() {
-                self.s.task = crate::demo::TASK.into();
+                self.s.task = if self.s.kind == Kind::Code { crate::demo_code::TASK } else { crate::demo::TASK }.into();
                 self.s.sync_dir();
             }
             if self.s.workers() == 0 {
@@ -926,7 +926,7 @@ fn draw_form(f: &mut Frame, w: &Wizard, area: Rect, t: f32) {
             arrows(fo, vec![chip(" REAL ", Color::Black, GREEN)])
         };
         let desc = match (w.s.demo, code) {
-            (true, true) => "  the demo always builds its sample web page, zero tokens",
+            (true, true) => "  scripted agents build a sample Rust CLI and fix a failing test, zero tokens",
             (true, false) => "  scripted agents build a sample page, zero tokens",
             _ => "  real agents, real tokens",
         };

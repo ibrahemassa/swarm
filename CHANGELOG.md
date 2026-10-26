@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.3.1
+
+- `swarm --demo --code` (or DEMO + CODE PROJECT in the launcher): a scripted code-mode show. Seven agents build
+  `csvjson`, a small Rust CLI, the first `cargo test` fails on a real bug, the lead routes the fix to the parser's
+  owner, the re-check passes and the round ships. The project it writes compiles and passes its 14 tests.
+- The demo engine plays along with the command bar in code mode too (edits land in each agent's own files).
+- Version detection on the boot screen finds the version anywhere in a CLI's output.
+
 ## 0.3.0
 
 - **Code mode** (`--code`, or CODE PROJECT in the launcher): the swarm works on any project, new or existing,

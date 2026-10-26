@@ -3,6 +3,7 @@
 
 mod app;
 mod demo;
+mod demo_code;
 mod fx;
 mod orchestrator;
 mod project;
@@ -119,7 +120,7 @@ fn from_args(a: &Args, task: String) -> std::io::Result<Start> {
             roster.push(AgentSpec { name: format!("{word}-{k}"), provider: p, model: m.clone() });
         }
     }
-    let kind = if a.code && !a.demo { Kind::Code } else { Kind::Page };
+    let kind = if a.code { Kind::Code } else { Kind::Page };
     let dir = a.out.clone().unwrap_or_else(|| orchestrator::default_dir(&task));
     let dir = orchestrator::prepare_dir(&dir, true, kind)?;
     Ok(Start {
@@ -140,7 +141,7 @@ fn from_args(a: &Args, task: String) -> std::io::Result<Start> {
 
 fn from_setup(s: setup::Setup) -> std::io::Result<Start> {
     setup::save_prefs(&s);
-    let kind = if s.demo { Kind::Page } else { s.kind };
+    let kind = s.kind;
     let dir = orchestrator::prepare_dir(&s.dir_path(), true, kind)?;
     Ok(Start {
         task: s.task.trim().to_string(),
@@ -183,7 +184,8 @@ fn choose(a: &Args, term: &mut DefaultTerminal) -> std::io::Result<Option<Start>
         return from_args(a, t.clone()).map(Some);
     }
     if a.demo {
-        return from_args(a, demo::TASK.to_string()).map(Some);
+        let task = if a.code { demo_code::TASK } else { demo::TASK };
+        return from_args(a, task.to_string()).map(Some);
     }
     if a.resume || a.out.is_some() {
         let cwd = std::env::current_dir().ok().filter(|d| State::path(d).exists());
