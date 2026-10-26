@@ -1,10 +1,10 @@
 [package]
 name = "swarm"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 rust-version = "1.90"
 resolver = "3"
-description = "A terminal mission control for a team of Claude Code, Codex and Antigravity agents that build a web page together, and keep taking orders while you talk to them"
+description = "A terminal mission control for a team of Claude Code, Codex and Antigravity agents that build web pages or any software project together, prove it with your tests, and keep taking orders while you talk to them"
 license = "MIT"
 repository = "https://github.com/ibrahemassa/swarm"
 readme = "README.md"

@@ -12,8 +12,9 @@ use ratatui::widgets::canvas::{Canvas, Circle, Line as CanvasLine, Points};
 use ratatui::widgets::{Block, BorderType, Clear, Paragraph};
 use ratatui::Frame;
 
-use crate::app::{AState, Agent, App, FileEntry, Kind, Level, Phase, COMMANDS, YOU};
+use crate::app::{AState, Agent, App, FileEntry, Kind, Level, Phase, CHECK_RECT, COMMANDS, YOU};
 use crate::fx::{self, dim, hsv, lerp};
+use crate::project::Kind as ProjectKind;
 
 pub(crate) const TEXT: Color = Color::Rgb(226, 226, 236);
 pub(crate) const SOFT: Color = Color::Rgb(176, 176, 196);
@@ -523,6 +524,17 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         }
     }
 
+    if bottom_h > 0 && app.check_visible() {
+        let [_, check, _, _] = Layout::horizontal([
+            Constraint::Percentage(30),
+            Constraint::Percentage(30),
+            Constraint::Percentage(18),
+            Constraint::Percentage(22),
+        ])
+        .areas(bottom);
+        app.rects.insert(CHECK_RECT, check);
+    }
+
     let app: &App = app;
     draw_header(f, app, header);
     draw_lead(f, app, lead_area);
@@ -540,11 +552,25 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         }
     }
     if bottom_h > 0 {
-        let [ev, files, comms] =
-            Layout::horizontal([Constraint::Percentage(44), Constraint::Percentage(24), Constraint::Percentage(32)]).areas(bottom);
-        draw_events(f, app, ev);
-        draw_files(f, app, files);
-        draw_comms(f, app, comms);
+        if app.check_visible() {
+            let [ev, check, files, comms] = Layout::horizontal([
+                Constraint::Percentage(30),
+                Constraint::Percentage(30),
+                Constraint::Percentage(18),
+                Constraint::Percentage(22),
+            ])
+            .areas(bottom);
+            draw_events(f, app, ev);
+            draw_check(f, app, check);
+            draw_files(f, app, files);
+            draw_comms(f, app, comms);
+        } else {
+            let [ev, files, comms] =
+                Layout::horizontal([Constraint::Percentage(44), Constraint::Percentage(24), Constraint::Percentage(32)]).areas(bottom);
+            draw_events(f, app, ev);
+            draw_files(f, app, files);
+            draw_comms(f, app, comms);
+        }
     }
     draw_input(f, app, input);
     draw_bubbles(f, app);
@@ -600,7 +626,8 @@ fn draw_header(f: &mut Frame, app: &App, area: Rect) {
         spans.push(Span::styled(" DEMO ", Style::new().fg(Color::Black).bg(NEON).add_modifier(Modifier::BOLD)));
     }
     spans.push(span("  ", FAINT));
-    for (i, p) in Phase::ALL.iter().enumerate() {
+    let phases = Phase::all(app.kind);
+    for (i, p) in phases.iter().enumerate() {
         let s = if *p == app.phase {
             let k = 0.5 + 0.5 * (t * 5.0).sin();
             Style::new().fg(Color::Black).bg(lerp(Color::Rgb(0, 190, 255), NEON, k)).add_modifier(Modifier::BOLD)
@@ -609,9 +636,12 @@ fn draw_header(f: &mut Frame, app: &App, area: Rect) {
         } else {
             st(FAINT)
         };
-        let label = if *p < app.phase { format!(" ✔ {} ", p.label()) } else { format!(" {} ", p.label()) };
+        // a round without a check command skips CHECK; don't tick it
+        let skipped = *p == Phase::Check && app.check.cmd.is_none() && app.check.last.is_none();
+        let s = if skipped && *p != app.phase { st(FAINT) } else { s };
+        let label = if *p < app.phase && !skipped { format!(" ✔ {} ", p.label()) } else { format!(" {} ", p.label()) };
         spans.push(Span::styled(label, s));
-        if i < 3 {
+        if i + 1 < phases.len() {
             spans.push(span("━━", if *p < app.phase { dim(GREEN, 0.6) } else { FAINT }));
         }
     }
@@ -619,6 +649,10 @@ fn draw_header(f: &mut Frame, app: &App, area: Rect) {
     // between rounds, show the one that just shipped
     let round = if app.phase == Phase::Ship && !app.busy() && app.round > 1 { app.round - 1 } else { app.round };
     spans.push(Span::styled(format!(" ROUND {round} "), Style::new().fg(Color::Black).bg(PURPLE).add_modifier(Modifier::BOLD)));
+    if let Some(chip) = check_chip(app) {
+        spans.push(span(" ", FAINT));
+        spans.push(chip);
+    }
     let left = Line::from(spans);
     let left_w = left.width() as u16;
     f.render_widget(left, area);
@@ -739,7 +773,7 @@ fn draw_lead(f: &mut Frame, app: &App, area: Rect) {
     ]);
     let name = if app.title.is_empty() { trunc(&app.task, 48) } else { trunc(&app.title, 48) };
     let right = Line::from(span(format!(" {name} "), SOFT)).right_aligned();
-    let url = app.server.clone().unwrap_or_default();
+    let url = app.server.clone().unwrap_or_else(|| crate::orchestrator::tilde(&app.dir));
     let foot = Line::from(vec![span(" ⌁ ", CYAN), span(format!("{url} "), MUTED)]).right_aligned();
     let block = Block::bordered().border_type(BorderType::Thick).border_style(st(bc)).title(title).title_top(right).title_bottom(foot);
     let inner = block.inner(area);
@@ -749,7 +783,25 @@ fn draw_lead(f: &mut Frame, app: &App, area: Rect) {
     }
     let row = |y: u16| Rect { x: inner.x, y, width: inner.width, height: 1 };
     f.render_widget(lead_status(app), row(inner.y));
-    let sub = if app.phase == Phase::Ship && !app.busy() {
+    let sub = if let Some((cmd, label, at)) = &app.check.running {
+        let fr = fx::SPINNER[(app.frame as usize / 2) % fx::SPINNER.len()];
+        Line::from(vec![
+            bold(format!("{fr} "), CYAN),
+            span(format!("{label}: "), SOFT),
+            bold(format!("$ {cmd}"), TEXT),
+            span(format!(" · {}", fmt_dur(at.elapsed())), MUTED),
+        ])
+    } else if app.phase == Phase::Ship && !app.busy() && app.kind == ProjectKind::Code {
+        let mut v = vec![span("⎿ ", GREEN), span("round shipped · ", SOFT)];
+        match (&app.check.last, &app.check.cmd) {
+            (Some((true, secs, _)), Some(c)) => v.push(span(format!("check ✔ {c} ({secs}s) · "), GREEN)),
+            (Some((false, _, _)), Some(c)) => v.push(span(format!("check ✖ {c} · "), RED)),
+            (_, None) if app.check.suggested.is_some() => v.push(span("/check to accept the suggested check · ", AMBER)),
+            _ => {}
+        }
+        v.push(span("type below to keep going", SOFT));
+        Line::from(v)
+    } else if app.phase == Phase::Ship && !app.busy() {
         Line::from(vec![
             span("⎿ ", GREEN),
             span("page is live · ", SOFT),
@@ -905,7 +957,13 @@ fn draw_card(f: &mut Frame, app: &App, i: usize, area: Rect) {
         bold(a.spec.name.clone(), a.color),
         span(format!(" ─ {} {} ", a.spec.provider.label(), a.spec.model_label()), MUTED),
     ]);
-    let role = if a.role.is_empty() { "no section".to_string() } else { a.role.clone() };
+    let role = if !a.role.is_empty() {
+        a.role.clone()
+    } else if app.kind == ProjectKind::Code {
+        "no task".to_string()
+    } else {
+        "no section".to_string()
+    };
     let role_t =
         Line::from(Span::styled(format!(" {role} "), Style::new().fg(Color::Black).bg(dim(a.color, 0.9)).add_modifier(Modifier::BOLD)))
             .right_aligned();
@@ -1001,9 +1059,16 @@ fn draw_files(f: &mut Frame, app: &App, area: Rect) {
         .iter()
         .map(|e| {
             let (icon, ic) = match e.path.rsplit('.').next().unwrap_or("") {
-                "html" => ("◇", ORANGE),
-                "css" => ("◆", CYAN),
-                "js" => ("◈", AMBER),
+                "html" | "htm" | "vue" | "svelte" => ("◇", ORANGE),
+                "css" | "scss" => ("◆", CYAN),
+                "js" | "mjs" | "jsx" => ("◈", AMBER),
+                "ts" | "tsx" => ("◈", Color::Rgb(90, 160, 255)),
+                "rs" => ("◆", Color::Rgb(255, 130, 80)),
+                "py" => ("◆", Color::Rgb(110, 190, 255)),
+                "go" => ("◆", Color::Rgb(100, 220, 230)),
+                "java" | "kt" | "rb" | "php" | "c" | "h" | "cpp" | "cs" | "swift" => ("◆", PURPLE),
+                "json" | "toml" | "yaml" | "yml" | "lock" => ("▪", MUTED),
+                "md" | "txt" => ("¶", SOFT),
                 _ => ("·", MUTED),
             };
             let age = e.at.elapsed().as_secs_f32();
@@ -1212,7 +1277,7 @@ fn draw_boot(f: &mut Frame, app: &App, area: Rect) {
             }
         }
     }
-    let sub = "multi-agent web forge  ·  claude × codex × antigravity";
+    let sub = "multi-agent dev forge  ·  claude × codex × antigravity";
     let shown = ((age - 0.7).max(0.0) * 70.0) as usize;
     centered(buf, area, y0 + 7, &Line::from(span(sub.chars().take(shown).collect::<String>(), MUTED)));
 
@@ -1270,8 +1335,23 @@ fn draw_ship(f: &mut Frame, app: &App, area: Rect) {
         app.msg_count,
         app.total_cost()
     );
-    let path = app.page_target();
-    let hint = "ctrl-o open it  ·  type below to change anything  ·  any key to continue";
+    let path = match (app.kind, &app.check.last, &app.check.cmd) {
+        (ProjectKind::Code, Some((ok, secs, _)), Some(c)) => {
+            format!(
+                "{}  {c} {} in {secs}s  ·  {}",
+                if *ok { "✔" } else { "✖" },
+                if *ok { "passed" } else { "failed" },
+                crate::orchestrator::tilde(&app.dir)
+            )
+        }
+        (ProjectKind::Code, _, _) => crate::orchestrator::tilde(&app.dir),
+        _ => app.page_target(),
+    };
+    let hint = if app.kind == ProjectKind::Code {
+        "type below to change anything  ·  /run to try it  ·  any key to continue"
+    } else {
+        "ctrl-o open it  ·  type below to change anything  ·  any key to continue"
+    };
     let box_w =
         (bw.max(stats.chars().count() as u16).max(path.chars().count() as u16).max(hint.chars().count() as u16) + 8).min(area.width);
     let box_h = 13.min(area.height);
@@ -1525,10 +1605,14 @@ fn draw_zoom(f: &mut Frame, app: &App, i: usize, area: Rect) {
     ];
     let owned: Vec<&crate::app::PlanItem> = app.plan.iter().filter(|p| p.agent == a.spec.name).collect();
     if owned.is_empty() {
-        lines.push(Line::from(span(if i == 0 { "styles/base.css · the plan" } else { "nothing yet" }, MUTED)));
+        let lead_owns = if app.kind == ProjectKind::Code { "the skeleton · the plan" } else { "styles/base.css · the plan" };
+        lines.push(Line::from(span(if i == 0 { lead_owns } else { "nothing yet" }, MUTED)));
     }
     for p in owned {
         lines.push(Line::from(vec![bold(format!("#{} ", p.id), a.color)]));
+        for g in p.owns.iter().take(4) {
+            lines.push(Line::from(span(format!(" ▸ {}", trunc(g, side.width as usize - 4)), CYAN)));
+        }
         for l in wrap_words(&p.brief, side.width as usize - 2).into_iter().take(3) {
             lines.push(Line::from(span(format!(" {l}"), FAINT)));
         }
@@ -1579,4 +1663,95 @@ fn draw_help(f: &mut Frame, app: &App, area: Rect) {
         span(" ", FAINT),
     ]));
     f.render_widget(Paragraph::new(lines).block(block), r);
+}
+
+// ── check ────────────────────────────────────────────────────────────────────────────────
+
+/// Small header chip with the check's state, if there is one.
+fn check_chip(app: &App) -> Option<Span<'static>> {
+    let c = &app.check;
+    let (text, bg) = if c.running.is_some() {
+        let fr = fx::SPINNER[(app.frame as usize / 2) % fx::SPINNER.len()];
+        (format!(" {fr} CHECK "), lerp(dim(CYAN, 0.6), CYAN, 0.5 + 0.5 * (app.t * 6.0).sin()))
+    } else {
+        match (&c.last, &c.cmd) {
+            (Some((true, _, l)), _) if l != "run" => (" ✔ CHECK ".to_string(), GREEN),
+            (Some((false, _, l)), _) if l != "run" => (" ✖ CHECK ".to_string(), RED),
+            (_, Some(_)) => (" ○ CHECK ".to_string(), MUTED),
+            (_, None) if c.suggested.is_some() => (" ? CHECK ".to_string(), AMBER),
+            _ => return None,
+        }
+    };
+    Some(Span::styled(text, Style::new().fg(Color::Black).bg(bg).add_modifier(Modifier::BOLD)))
+}
+
+fn check_line_color(l: &str) -> Color {
+    let low = l.to_lowercase();
+    if low.contains("error") || low.contains("failed") || low.contains("panicked") || low.contains("traceback") || low.starts_with("fail") {
+        RED
+    } else if low.contains("warning") || low.contains("warn:") {
+        AMBER
+    } else if low.contains(" ok") || low.contains("passed") || low.contains("success") || low.starts_with("ok") || low.contains("✓") {
+        GREEN
+    } else if l.starts_with('$') {
+        CYAN
+    } else {
+        SOFT
+    }
+}
+
+fn draw_check(f: &mut Frame, app: &App, area: Rect) {
+    let c = &app.check;
+    let (status, sc) = match (&c.running, &c.last) {
+        (Some((_, label, at)), _) => {
+            let fr = fx::SPINNER[(app.frame as usize / 2) % fx::SPINNER.len()];
+            (format!(" {fr} {label} · {} ", fmt_dur(at.elapsed())), CYAN)
+        }
+        (None, Some((true, secs, label))) => (format!(" ✔ {} · {secs}s ", if label == "run" { "done" } else { "passed" }), GREEN),
+        (None, Some((false, secs, _))) => (format!(" ✖ failed · {secs}s "), RED),
+        _ => (String::new(), MUTED),
+    };
+    let border = match (&c.running, &c.last, c.at) {
+        (Some(_), _, _) => lerp(dim(CYAN, 0.35), CYAN, 0.5 + 0.5 * (app.t * 4.0).sin()),
+        (None, Some((ok, _, _)), Some(at)) if at.elapsed().as_secs_f32() < 1.2 => {
+            let k = at.elapsed().as_secs_f32() / 1.2;
+            lerp(if *ok { GREEN } else { RED }, FAINT, k)
+        }
+        _ => FAINT,
+    };
+    let cmd = c.running.as_ref().map(|r| r.0.clone()).or_else(|| c.cmd.clone()).unwrap_or_default();
+    let block = Block::bordered()
+        .border_type(BorderType::Rounded)
+        .border_style(st(border))
+        .title(Line::from(vec![
+            span(" ⚙ ", CYAN),
+            bold("CHECK", TEXT),
+            span(format!(" {} ", trunc(&cmd, (area.width as usize).saturating_sub(status.chars().count() + 14))), MUTED),
+        ]))
+        .title_top(Line::from(bold(status, sc)).right_aligned());
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+    let (h, w) = (inner.height as usize, inner.width as usize);
+    let lines: Vec<Line> = if c.lines.is_empty() && c.running.is_none() {
+        match (&c.cmd, &c.suggested) {
+            (Some(cmd), _) => vec![
+                Line::from(span(format!("runs after every round: {cmd}"), MUTED)),
+                Line::from(span("failures go back to the team (3 fix rounds max)", FAINT)),
+                Line::from(span("/check runs it now · /run <cmd> runs anything", FAINT)),
+            ],
+            (None, Some(sug)) => vec![
+                Line::from(span("suggested check:", MUTED)),
+                Line::from(bold(format!("$ {sug}"), AMBER)),
+                Line::from(span("/check to accept · /check <cmd> to set your own", FAINT)),
+            ],
+            _ => vec![
+                Line::from(span("no check command yet", MUTED)),
+                Line::from(span("/check <cmd> sets one, e.g. /check cargo test", FAINT)),
+                Line::from(span("/run <cmd> runs anything once", FAINT)),
+            ],
+        }
+    } else {
+        c.lines.iter().rev().take(h).rev().map(|l| Line::from(span(trunc(l, w), check_line_color(l)))).collect()
+    };
+    f.render_widget(Paragraph::new(lines), inner);
 }

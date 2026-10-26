@@ -5,6 +5,8 @@ mod app;
 mod demo;
 mod fx;
 mod orchestrator;
+mod project;
+mod prompts;
 mod providers;
 mod server;
 mod session;
@@ -21,17 +23,25 @@ use ratatui::DefaultTerminal;
 
 use app::{App, Launch};
 use orchestrator::{Config, State};
+use project::Kind;
 use providers::{AgentSpec, Provider};
 use setup::{Choice, Open};
 
-/// Run a swarm of Claude Code / Codex / Antigravity agents that build a web page together and
-/// keep taking orders, on a dashboard that looks unreasonably busy. Run with no arguments for the
-/// launcher.
+/// Run a swarm of Claude Code / Codex / Antigravity agents that build a web page, or any software
+/// project, together and keep taking orders, on a dashboard that looks unreasonably busy. Run with
+/// no arguments for the launcher.
 #[derive(Parser, Debug, Clone)]
 #[command(name = "swarm", version)]
 pub struct Args {
-    /// What to build, e.g. "landing page for a neon ramen bar". Leave out to open the launcher.
+    /// What to build or change, e.g. "landing page for a neon ramen bar". Leave out to open the launcher.
     pub task: Option<String>,
+    /// Work on any kind of project (new or existing, see --out) instead of a single web page
+    #[arg(long)]
+    pub code: bool,
+    /// Command that builds and tests the project; swarm runs it after every round and sends
+    /// failures back to the team (code mode, e.g. "cargo test")
+    #[arg(long)]
+    pub check: Option<String>,
     /// Number of Claude Code workers
     #[arg(long, default_value_t = 4)]
     pub claude: usize,
@@ -91,6 +101,8 @@ struct Start {
     budget: f64,
     relief_model: String,
     resume: Option<State>,
+    kind: Kind,
+    check: Option<String>,
 }
 
 fn from_args(a: &Args, task: String) -> std::io::Result<Start> {
@@ -107,8 +119,9 @@ fn from_args(a: &Args, task: String) -> std::io::Result<Start> {
             roster.push(AgentSpec { name: format!("{word}-{k}"), provider: p, model: m.clone() });
         }
     }
+    let kind = if a.code && !a.demo { Kind::Code } else { Kind::Page };
     let dir = a.out.clone().unwrap_or_else(|| orchestrator::default_dir(&task));
-    let dir = orchestrator::prepare_dir(&dir, true)?;
+    let dir = orchestrator::prepare_dir(&dir, true, kind)?;
     Ok(Start {
         task,
         dir,
@@ -120,12 +133,15 @@ fn from_args(a: &Args, task: String) -> std::io::Result<Start> {
         budget: a.budget,
         relief_model: a.model.clone(),
         resume: None,
+        kind,
+        check: a.check.clone().filter(|c| !c.trim().is_empty()),
     })
 }
 
 fn from_setup(s: setup::Setup) -> std::io::Result<Start> {
     setup::save_prefs(&s);
-    let dir = orchestrator::prepare_dir(&s.dir_path(), true)?;
+    let kind = if s.demo { Kind::Page } else { s.kind };
+    let dir = orchestrator::prepare_dir(&s.dir_path(), true, kind)?;
     Ok(Start {
         task: s.task.trim().to_string(),
         roster: s.roster(),
@@ -136,13 +152,15 @@ fn from_setup(s: setup::Setup) -> std::io::Result<Start> {
         budget: s.budget,
         relief_model: if s.model(Provider::Claude).is_empty() { "sonnet".into() } else { s.model(Provider::Claude).to_string() },
         resume: None,
+        check: (kind == Kind::Code).then(|| s.check.trim().to_string()).filter(|c| !c.is_empty()),
+        kind,
         dir,
     })
 }
 
 fn from_saved(dir: PathBuf, a: &Args) -> std::io::Result<Option<Start>> {
-    let dir = orchestrator::prepare_dir(&dir, false)?;
     let Some(st) = State::load(&dir) else { return Ok(None) };
+    let dir = orchestrator::prepare_dir(&dir, false, st.kind)?;
     Ok(Some(Start {
         task: st.task.clone(),
         roster: st.agents.iter().map(|a| a.spec.clone()).collect(),
@@ -153,6 +171,8 @@ fn from_saved(dir: PathBuf, a: &Args) -> std::io::Result<Option<Start>> {
         budget: a.budget,
         relief_model: a.model.clone(),
         dir,
+        kind: st.kind,
+        check: st.check.clone(),
         resume: Some(st),
     }))
 }
@@ -227,6 +247,8 @@ fn run(args: &Args, terminal: &mut DefaultTerminal) -> std::io::Result<Option<St
         live: start.live,
         relief_model: start.relief_model.clone(),
         resume: start.resume.clone(),
+        kind: start.kind,
+        check: start.check.clone(),
     };
     if start.demo {
         rt.spawn(demo::run(cfg, tx, cmd_rx));
@@ -243,6 +265,8 @@ fn run(args: &Args, terminal: &mut DefaultTerminal) -> std::io::Result<Option<St
             demo: start.demo,
             auto_open: start.auto_open,
             budget: start.budget,
+            kind: start.kind,
+            check: start.check,
         },
         cmd_tx,
     );

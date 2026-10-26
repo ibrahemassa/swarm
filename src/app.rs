@@ -12,27 +12,37 @@ use tokio::sync::mpsc::UnboundedSender;
 
 use crate::fx::{self, Packet, Particle, Rng};
 use crate::orchestrator::Cmd;
+use crate::project::{self, Kind as ProjectKind};
 use crate::providers::{AgentSpec, Provider};
 
 /// Stand-in agent index for the human at the command bar.
 pub const YOU: usize = usize::MAX;
+/// Where the CHECK panel was drawn last frame (for its particle burst).
+pub const CHECK_RECT: usize = usize::MAX - 1;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Phase {
     Plan,
     Build,
     Review,
+    Check,
     Ship,
 }
 
 impl Phase {
-    pub const ALL: [Phase; 4] = [Phase::Plan, Phase::Build, Phase::Review, Phase::Ship];
+    pub fn all(kind: ProjectKind) -> &'static [Phase] {
+        match kind {
+            ProjectKind::Page => &[Phase::Plan, Phase::Build, Phase::Review, Phase::Ship],
+            ProjectKind::Code => &[Phase::Plan, Phase::Build, Phase::Review, Phase::Check, Phase::Ship],
+        }
+    }
 
     pub fn label(self) -> &'static str {
         match self {
             Phase::Plan => "PLAN",
             Phase::Build => "BUILD",
             Phase::Review => "REVIEW",
+            Phase::Check => "CHECK",
             Phase::Ship => "SHIP",
         }
     }
@@ -67,6 +77,8 @@ pub struct PlanItem {
     pub id: String,
     pub agent: String,
     pub brief: String,
+    /// Code mode: the files (paths or globs) this task owns.
+    pub owns: Vec<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -101,6 +113,33 @@ pub enum Ev {
     Server(String),
     /// A saved project was picked back up at this round.
     Resumed(u32),
+    /// The check command (or a `/run`) started.
+    CheckStart {
+        cmd: String,
+        label: String,
+    },
+    CheckLine(String),
+    CheckDone {
+        ok: bool,
+        secs: u64,
+    },
+    /// The lead proposed a check command; it waits for `/check`.
+    CheckSuggest(String),
+    /// The approved check command changed.
+    CheckSet(Option<String>),
+}
+
+/// What the CHECK panel shows.
+#[derive(Default)]
+pub struct CheckView {
+    pub cmd: Option<String>,
+    pub suggested: Option<String>,
+    /// command, label, started
+    pub running: Option<(String, String, Instant)>,
+    /// passed, seconds, label of the run
+    pub last: Option<(bool, u64, String)>,
+    pub lines: VecDeque<String>,
+    pub at: Option<Instant>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -289,7 +328,9 @@ pub const COMMANDS: &[(&str, &str)] = &[
     ("/help", "keys and commands"),
     ("/add", "hire an agent: /add claude|agy|codex [model]"),
     ("/stop", "interrupt everyone, or /stop <name>"),
-    ("/review", "the lead reviews the whole page now"),
+    ("/review", "the lead reviews the whole project now"),
+    ("/check", "accept the lead's check, set one (/check cargo test), or /check off"),
+    ("/run", "run a command in the project and watch its output: /run npm start"),
     ("/open", "open the live page in your browser"),
     ("/budget", "spending cap for this session in USD (0 = none)"),
     ("/fx", "toggle heavy effects"),
@@ -300,6 +341,8 @@ pub struct App {
     pub task: String,
     pub dir: PathBuf,
     pub demo: bool,
+    pub kind: ProjectKind,
+    pub check: CheckView,
     auto_open: bool,
     cmd: UnboundedSender<Cmd>,
     pub agents: Vec<Agent>,
@@ -379,6 +422,8 @@ pub struct Launch {
     pub demo: bool,
     pub auto_open: bool,
     pub budget: f64,
+    pub kind: ProjectKind,
+    pub check: Option<String>,
 }
 
 impl App {
@@ -406,6 +451,8 @@ impl App {
             task: l.task,
             dir: l.dir,
             demo: l.demo,
+            kind: l.kind,
+            check: CheckView { cmd: l.check, ..CheckView::default() },
             auto_open: l.auto_open,
             cmd,
             agents,
@@ -468,6 +515,11 @@ impl App {
 
     pub fn elapsed(&self) -> Duration {
         self.start.elapsed()
+    }
+
+    /// Show the CHECK panel: always in code mode, in page mode once a command has been involved.
+    pub fn check_visible(&self) -> bool {
+        self.kind == ProjectKind::Code || self.check.cmd.is_some() || self.check.running.is_some() || !self.check.lines.is_empty()
     }
 
     pub fn busy(&self) -> bool {
@@ -571,7 +623,8 @@ impl App {
                         self.open_page();
                     }
                 } else {
-                    self.toast(Level::Good, format!("✔ round {round} shipped · the page is updated"));
+                    let what = if self.kind == ProjectKind::Code { "changes are in" } else { "the page is updated" };
+                    self.toast(Level::Good, format!("✔ round {round} shipped · {what}"));
                 }
                 self.log(Level::Good, format!("SHIPPED round {round}"));
             }
@@ -579,6 +632,46 @@ impl App {
                 self.round = round;
                 self.cost_base = self.total_cost();
                 self.boot_skipped = true;
+            }
+            Ev::CheckStart { cmd, label } => {
+                self.check.lines.clear();
+                self.check.running = Some((cmd.clone(), label, Instant::now()));
+                self.check.at = Some(Instant::now());
+            }
+            Ev::CheckLine(l) => {
+                self.check.lines.push_back(l);
+                while self.check.lines.len() > 400 {
+                    self.check.lines.pop_front();
+                }
+            }
+            Ev::CheckDone { ok, secs } => {
+                let Some((cmd, label, _)) = self.check.running.take() else { return };
+                let now = Instant::now();
+                self.check.at = Some(now);
+                self.check.last = Some((ok, secs, label.clone()));
+                if label == "run" {
+                    self.toast(if ok { Level::Good } else { Level::Bad }, format!("{} `{}` ({secs}s)", if ok { "✔" } else { "✖" }, cmd));
+                } else if ok {
+                    self.toast(Level::Good, format!("✔ check passed · {cmd} · {secs}s"));
+                    if let Some(r) = self.rects.get(&CHECK_RECT).or(self.rects.get(&0)).copied() {
+                        let (x, y) = center(&r);
+                        fx::burst(&mut self.particles, &mut self.rng, x, y, Color::Rgb(80, 250, 123), 70, 18.0);
+                    }
+                } else {
+                    self.toast(Level::Bad, format!("✖ check failed · {cmd} · sending it back to the team"));
+                }
+            }
+            Ev::CheckSuggest(cmd) => {
+                if self.check.cmd.is_none() {
+                    self.toast(Level::Warn, format!("lead suggests the check `{cmd}` · /check to accept"));
+                }
+                self.check.suggested = Some(cmd);
+            }
+            Ev::CheckSet(cmd) => {
+                if let Some(c) = &cmd {
+                    self.toast(Level::Good, format!("check set: {c}"));
+                }
+                self.check.cmd = cmd;
             }
             Ev::Server(url) => {
                 self.log(Level::Info, format!("live preview at {url}"));
@@ -634,6 +727,13 @@ impl App {
                 if !a.tool_logged {
                     a.tool_logged = true;
                     log = Some((Level::Info, format!("{} ⏺ {}({})", a.spec.name, a.tool, a.detail)));
+                    // code mode: flag edits to files another agent owns
+                    if self.kind == ProjectKind::Code && i != 0 && matches!(a.tool.as_str(), "Write" | "Edit") {
+                        let owner = self.plan.iter().find(|p| project::owns(&p.owns, &a.detail)).map(|p| p.agent.clone());
+                        if let Some(o) = owner.filter(|o| *o != a.spec.name) {
+                            log = Some((Level::Warn, format!("{} is editing {} (owned by {o})", a.spec.name, a.detail)));
+                        }
+                    }
                 }
             }
             AgentEv::Code(s) => {
@@ -833,12 +933,13 @@ impl App {
     pub fn page_target(&self) -> String {
         match &self.server {
             Some(url) => url.clone(),
+            None if self.kind == ProjectKind::Code && !self.dir.join("index.html").exists() => self.dir.display().to_string(),
             None => self.dir.join("index.html").display().to_string(),
         }
     }
 
     pub fn open_page(&mut self) {
-        if self.server.is_none() && !self.dir.join("index.html").exists() {
+        if self.kind == ProjectKind::Page && self.server.is_none() && !self.dir.join("index.html").exists() {
             self.toast(Level::Warn, "no page yet, the agents are still on it");
             return;
         }
@@ -859,13 +960,16 @@ impl App {
     pub fn summary(&self) -> String {
         let index = self.dir.join("index.html");
         let mut s = format!(
-            "swarm · {} agents · {} · {} tokens · {} messages · ${:.2} this session\n  page:    {}\n",
+            "swarm · {} agents · {} · {} tokens · {} messages · ${:.2} this session\n  {}\n",
             self.agents.len(),
             crate::ui::fmt_dur(self.elapsed()),
             crate::ui::fmt_k(self.total_tokens()),
             self.msg_count,
             self.spent(),
-            index.display(),
+            match self.kind {
+                ProjectKind::Page => format!("page:    {}", index.display()),
+                ProjectKind::Code => format!("project: {}", self.dir.display()),
+            },
         );
         if !self.demo {
             s += &format!("  resume:  swarm -o {}   (or run `swarm` and pick it under RECENT)", self.dir.display());
@@ -1157,6 +1261,8 @@ impl App {
             let mut parts = cmd.split_whitespace();
             let name = parts.next().unwrap_or("").to_lowercase();
             let args: Vec<&str> = parts.collect();
+            // everything after the command word, spacing and quotes intact
+            let rest = cmd.trim_start().split_once(char::is_whitespace).map(|(_, r)| r.trim()).unwrap_or("").to_string();
             match name.as_str() {
                 "help" | "h" | "?" => self.help = true,
                 "quit" | "q" | "exit" => return true,
@@ -1189,6 +1295,14 @@ impl App {
                     }
                     _ => self.toast(Level::Info, format!("spent ${:.2} this session · usage: /budget 5", self.spent())),
                 },
+                "check" => self.send(Cmd::Check((!rest.is_empty()).then_some(rest))),
+                "run" => {
+                    if rest.is_empty() {
+                        self.toast(Level::Warn, "usage: /run <command>, e.g. /run npm start");
+                    } else {
+                        self.send(Cmd::Run(rest));
+                    }
+                }
                 "add" | "hire" => {
                     let Some(p) = args.first().and_then(|a| Provider::parse(a)) else {
                         self.toast(Level::Warn, "usage: /add claude|agy|codex [model]");

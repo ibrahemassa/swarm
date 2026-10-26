@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.3.0
+
+- **Code mode** (`--code`, or CODE PROJECT in the launcher): the swarm works on any project, new or existing,
+  not just one web page. The lead writes the skeleton (or reads the existing code), then splits the work into tasks
+  that each own a set of files or globs.
+- **Check command** (`--check`, the launcher, or `/check`): runs after every round and gates the ship. Failures go
+  back to the lead, who sends fixes to the owners of the broken code; up to three fix rounds. The lead can suggest a
+  check, but nothing runs until you accept it.
+- The launcher detects the project's usual test command (cargo, npm/pnpm/yarn/bun, go, pytest or unittest, make) and
+  describes an existing folder before you launch.
+- `/run <cmd>` runs any command in the project and streams it to the new CHECK panel.
+- CHECK step in the phase pipeline, a check chip in the header, live colored test output.
+- Warnings when an agent edits a file another agent owns.
+- Existing repos: `.swarm/` goes into `.git/info/exclude`, and a `git diff --shortstat` is logged when a round ships.
+- The file watcher skips dependency and build folders (`node_modules`, `target`, `dist`, …).
+
 ## 0.2.0
 
 - **Launcher**: `swarm` with no arguments opens a setup screen: what to build, project folder, lead and squad

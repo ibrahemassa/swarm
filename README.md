@@ -3,8 +3,9 @@
 # swarm
 
 **Mission control for a team of AI coding agents.**
-Claude Code, Codex and Antigravity agents build a web page together, message each other while they work,
-and keep taking orders from you, all on one terminal dashboard.
+Claude Code, Codex and Antigravity agents build a web page, or any software project, together. They message each
+other while they work, prove it works with your test command, and keep taking orders from you, all on one
+terminal dashboard.
 
 [![CI](https://github.com/ibrahemassa/swarm/actions/workflows/ci.yml/badge.svg)](https://github.com/ibrahemassa/swarm/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
@@ -17,9 +18,18 @@ and keep taking orders from you, all on one terminal dashboard.
 
 ---
 
-You describe a page. A **lead agent** writes the design system and splits the page into sections. A squad of
-**worker agents** (any mix of Claude Code, Codex and Antigravity) builds the sections in parallel, and they
-coordinate through a shared team chat. The lead reviews the result and the page ships to a live preview.
+You describe what you want. A **lead agent** lays the groundwork and splits the work. A squad of **worker
+agents** (any mix of Claude Code, Codex and Antigravity) builds the parts in parallel, and they coordinate through a
+shared team chat. The lead reviews the result, and the round ships.
+
+swarm works in two modes:
+
+- **Page mode** (the default) builds one static web page, section by section, with a live preview that reloads
+  as the agents type.
+- **Code mode** (`--code`) works on **anything**: a CLI, a library, an API, a game, or changes to a repo you
+  already have. The lead splits the work by **file ownership**, and a **check command** you approve (`cargo test`,
+  `npm test`, …) runs after every round. When it fails, the output goes back to the agents who own the broken
+  code, and they fix it.
 
 Then the swarm **stays up**. Tell the lead what to change and it plans the work and hands it out. DM a single
 agent to tweak its section, hire more agents mid-session, stop everyone, raise the budget. Every round ships
@@ -36,6 +46,9 @@ saved, and `swarm -c` picks up where you left off.
   answer back in speech bubbles, and they can message you on their own too.
 - **Persistent sessions**: Claude Code and Antigravity keep one live conversation per agent (turns stream in on
   stdin), and Codex resumes its thread for every turn. Agents remember what they built.
+- **Code mode**: new projects or existing repos. Every task owns a set of files (`src/api/**`), swarm warns when
+  an agent edits someone else's files, and a check command gates every round with up to three automatic fix rounds.
+  The CHECK panel streams the test output live.
 - **Live preview**: a tiny local server (`http://127.0.0.1:7700`) serves the page and reloads it, keeping your
   scroll position, whenever any file changes.
 - **Budget cap**: set a USD cap in the launcher, with `--budget`, or with `/budget` at any time. When the
@@ -78,9 +91,41 @@ swarm --demo                            # the show, zero tokens
 swarm "landing page for a neon ramen bar"
 swarm "portfolio for a tattoo artist" --claude 5 --agy 2 --codex 3 --live
 swarm -c                                # resume the last project
+
+# code mode: anything that isn't a single web page
+swarm --code "a CLI in Rust that converts CSV to JSON, with tests" --check "cargo test"
+swarm --code -o ~/code/myapp "add dark mode to the settings screen, with tests"
 ```
 
-<p align="center"><img src="docs/launcher.png" alt="The launcher: what to build, folder, lead and squad, review, browser, mode, budget, plus squad preview, CLI checks and recent projects" width="100%"></p>
+<p align="center"><img src="docs/launcher.png" alt="The launcher in code mode: the job, project type, an existing Python repo detected with its test command, the squad, budget, CLI checks and recent projects" width="100%"></p>
+
+## Code projects
+
+Pick **CODE PROJECT** in the launcher, or pass `--code`. Point `-o` at an empty folder to start something new, or at
+an existing repo to change it.
+
+<p align="center"><img src="docs/code-build.png" alt="Code mode on an existing Python repo: two owners editing their files while the CHECK panel shows the last test run" width="100%"></p>
+
+- **Planning**: for a new project the lead picks the stack and writes the skeleton (manifest, entry point, shared
+  types, README). For an existing repo it reads the code first and builds on it. Either way it answers with tasks
+  that each own a set of paths or globs, like `src/api/**` or `tests/test_api.py`, and spells out the interfaces
+  between them.
+- **Ownership**: agents only change files they own and message the owner when they need something else changed. If
+  one edits another agent's file anyway, the event log flags it.
+- **The check**: one command that builds and tests the project. The launcher detects the usual one from the repo
+  (`cargo test`, `npm test`, `go test ./...`, `python3 -m pytest -q`, `make test`, …) and lets you edit it, or you
+  pass `--check`. If you don't set one, the lead suggests one in its plan.
+- **The fix loop**: after the build (and review), swarm runs the check. If it passes, the round ships. If it fails,
+  the lead gets the end of the output and sends the fixes to the owners of the broken code, then swarm checks again,
+  up to three times.
+- **Existing repos**: swarm adds `.swarm/` to `.git/info/exclude` so it never shows up in `git status`, and logs a
+  `git diff --shortstat` when a round ships. It never commits.
+
+<p align="center"><img src="docs/code-check.png" alt="A round shipped after the check passed: 76 tests OK in the CHECK panel, check chip green in the header" width="100%"></p>
+
+> **What runs on your machine.** swarm itself only runs commands you typed or accepted: the check you set or
+> approved with `/check`, and anything you `/run`. A command the lead suggests waits for your `/check`. Claude Code
+> agents still get file tools only; Codex runs its own commands inside its `workspace-write` sandbox.
 
 ## Talking to the swarm
 
@@ -101,7 +146,9 @@ The command bar at the bottom is always live, even mid-build.
 |---|---|
 | `/add claude\|agy\|codex [model]` | hire another agent mid-session (`/add claude haiku`, `/add agy gemini-3.8-flash-low`) |
 | `/stop [name]` | interrupt everyone, or one agent; their conversations stay resumable |
-| `/review` | the lead reviews the whole page now |
+| `/review` | the lead reviews the whole project now |
+| `/check` | accept the lead's suggested check and run it; `/check <cmd>` sets your own; `/check off` turns it off |
+| `/run <cmd>` | run any command in the project and stream its output to the CHECK panel (`/run cargo run -- --help`) |
 | `/budget <usd>` | set or raise the spending cap for this session (`0` = no cap) |
 | `/open` | open the live preview |
 | `/fx` | toggle the heavy effects |
@@ -148,6 +195,9 @@ The command bar at the bottom is always live, even mid-build.
                           http://127.0.0.1:7700  (auto-reload)
 ```
 
+Page mode, step by step (code mode is the same loop with file ownership instead of sections, and a CHECK step
+before SHIP):
+
 1. **Plan**: the lead writes `styles/base.css` (palette, type, spacing as CSS variables) and answers with a JSON plan:
    one section per worker, in page order.
 2. **Build**: each worker owns `sections/<id>.html`, `styles/<id>.css` (every selector scoped under `#<id>`) and
@@ -189,11 +239,15 @@ swarm-neon-ramen-bar/
 
 The output is plain static HTML/CSS/JS with no build step. Copy the folder anywhere to host it.
 
+In code mode swarm leaves your project's layout alone and only adds `.swarm/`.
+
 ## Options
 
 | Flag | Default | |
 |---|---|---|
-| `TASK` | | what to build; leave it out to open the launcher |
+| `TASK` | | what to build or change; leave it out to open the launcher |
+| `--code` | | code mode: any project, new or existing (see `-o`) |
+| `--check CMD` | | code mode: the command that builds and tests the project, run after every round |
 | `--claude N` | `4` | Claude Code workers (`--model`, default `sonnet`) |
 | `--agy N` | `2` | Antigravity workers (`--agy-model`, default `gemini-3.8-flash-high`) |
 | `--codex N` | `1` if logged in | Codex workers (`--codex-model`, default: your Codex config) |
@@ -221,6 +275,8 @@ report cost, so their usage isn't counted. Demo mode is free.
 - **Codex workers fail with `401 Unauthorized`**: run `codex login`. Until then a Claude backup takes over their sections.
 - **An Antigravity worker "succeeds" without writing anything**: headless `agy` auto-denies shell commands. swarm
   tells it to use file tools only, and treats a missing section file as a failure (a backup takes over).
+- **The check keeps failing because a tool is missing** (say `pytest`): swarm can't install things for you. Install it,
+  or switch the check with `/check <cmd>` (for Python, `python3 -m unittest discover -v` needs nothing extra).
 - **Port 7700 is busy**: swarm uses the next free port up to 7799. The URL is in the lead panel's footer.
 - **Everything looks cramped**: the dashboard wants about 160×45 or larger. Smaller terminals work, with fewer panels.
 
@@ -230,7 +286,9 @@ report cost, so their usage isn't counted. Demo mode is free.
 |---|---|
 | `src/main.rs` | CLI flags; picks between flags, a saved project and the launcher; runs the dashboard loop |
 | `src/setup.rs` | the launcher, saved preferences, recent projects |
-| `src/orchestrator.rs` | plan, build, review, ship, routing your messages; prompts; page assembly; file and mail watchers; `state.json` |
+| `src/orchestrator.rs` | plan, build, review, check, fix, ship; routing your messages; page assembly; file and mail watchers; `state.json` |
+| `src/prompts.rs` | every prompt, for page mode and code mode |
+| `src/project.rs` | project types, ownership globs, check detection, the check runner |
 | `src/session.rs` | one long-lived agent: persistent stdin turns for Claude Code and Antigravity, resumed turns for Codex |
 | `src/providers.rs` | how to launch each CLI and turn its JSON event stream into dashboard events |
 | `src/server.rs` | the live-preview server with auto-reload |

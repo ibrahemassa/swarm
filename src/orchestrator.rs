@@ -1,7 +1,10 @@
-//! The real thing: a lead plans the page, workers build sections in parallel and message each other
-//! through files in `.swarm/`, failed agents get replaced, the lead reviews, the page ships. Then the
-//! swarm stays up: you talk to the lead (who re-plans and hands out work) or DM any agent directly,
-//! and every round of changes ships again.
+//! The real thing: a lead plans the work, workers build their parts in parallel and message each
+//! other through files in `.swarm/`, failed agents get replaced, the lead reviews, a check command
+//! proves it works, the round ships. Then the swarm stays up: you talk to the lead (who re-plans and
+//! hands out work) or DM any agent directly, and every round of changes ships again.
+//!
+//! Page mode builds one static web page out of per-agent sections. Code mode works on any project,
+//! new or existing, with each agent owning a set of files.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
@@ -13,6 +16,8 @@ use serde_json::{json, Value};
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 
 use crate::app::{AgentEv, Ev, Level, Phase, PlanItem};
+use crate::project::{self, Kind};
+use crate::prompts::*;
 use crate::providers::{AgentSpec, Provider};
 use crate::session::{self, Handle, Note};
 
@@ -29,6 +34,11 @@ pub enum Cmd {
     Add(Provider, String),
     Stop(Option<String>),
     Review,
+    /// Set the check command (`Some`), turn it off (`Some("off")`), or accept the lead's suggestion
+    /// and run it (`None`).
+    Check(Option<String>),
+    /// Run a command once and show its output.
+    Run(String),
 }
 
 #[derive(Clone)]
@@ -40,6 +50,9 @@ pub struct Config {
     pub live: bool,
     pub relief_model: String,
     pub resume: Option<State>,
+    pub kind: Kind,
+    /// Approved by the user; swarm only ever runs commands the user gave or accepted.
+    pub check: Option<String>,
 }
 
 #[derive(Clone)]
@@ -79,6 +92,8 @@ pub struct State {
     pub review: bool,
     pub agents: Vec<SavedAgent>,
     pub plan: Vec<PlanItem>,
+    pub kind: Kind,
+    pub check: Option<String>,
 }
 
 impl State {
@@ -105,7 +120,11 @@ impl State {
         }
         let plan = v["plan"]
             .as_array()
-            .map(|p| p.iter().map(|i| PlanItem { id: s(&i["id"]), agent: s(&i["agent"]), brief: s(&i["brief"]) }).collect())
+            .map(|p| {
+                p.iter()
+                    .map(|i| PlanItem { id: s(&i["id"]), agent: s(&i["agent"]), brief: s(&i["brief"]), owns: strings(&i["owns"]) })
+                    .collect()
+            })
             .unwrap_or_default();
         Some(State {
             task: s(&v["task"]),
@@ -115,6 +134,8 @@ impl State {
             review: v["review"].as_bool().unwrap_or(true),
             agents,
             plan,
+            kind: Kind::parse(v["kind"].as_str().unwrap_or("page")),
+            check: v["check"].as_str().filter(|c| !c.trim().is_empty()).map(String::from),
         })
     }
 
@@ -129,90 +150,11 @@ impl State {
                 "name": a.spec.name, "provider": a.spec.provider.key(), "model": a.spec.model,
                 "session": a.session, "cost": a.cost,
             })).collect::<Vec<_>>(),
-            "plan": self.plan.iter().map(|i| json!({"id": i.id, "agent": i.agent, "brief": i.brief})).collect::<Vec<_>>(),
+            "plan": self.plan.iter().map(|i| json!({"id": i.id, "agent": i.agent, "brief": i.brief, "owns": i.owns})).collect::<Vec<_>>(),
+            "kind": self.kind.key(),
+            "check": self.check,
         });
         let _ = std::fs::write(Self::path(dir), serde_json::to_string_pretty(&v).unwrap_or_default());
-    }
-}
-
-// ── prompts ──────────────────────────────────────────────────────────────────────────────
-
-const PLAN_PROMPT: &str = r#"You are %LEAD%, the lead engineer of a swarm of AI coding agents that will build ONE static web page together, in parallel.
-
-User request: "%TASK%"
-Project folder (absolute path): %DIR%
-Your team (each member gets exactly one task): %TEAM%
-
-How the page gets assembled: index.html is generated automatically. It links styles/base.css, then for every task id in your order it links styles/<id>.css, inlines sections/<id>.html into <body>, and loads scripts/<id>.js if that file exists.
-
-Do exactly two things:
-1. Create %DIR%/styles/base.css: the shared design system. CSS custom properties on :root (palette, fonts, spacing scale, radius), an @import for any Google Fonts you pick, a modern reset, body and heading typography, and a .container helper. Make the art direction bold and specific to the request, never generic.
-2. Reply with ONLY this JSON, no markdown fence and no commentary:
-{"title": "<page title>", "vibe": "<one sentence of art direction>", "tasks": [{"agent": "<team member name>", "id": "<kebab-case section id>", "brief": "<2-3 sentences: content, layout, interactions>"}]}
-
-Task rules: exactly one task per team member, listed in top-to-bottom page order. Ids are unique, short, kebab-case (hero, features, gallery, pricing, faq, footer...). The first task includes the site nav, the last one is the footer. If the page wants global JS (scroll reveals, cursor effects), give it to the owner of the first section.
-Do not create any other files. Later the user will send you more requests as new messages in this conversation.
-%TOOLS%"#;
-
-const WORKER_PROMPT: &str = r#"You are %NAME%, one of %N% AI agents building a single web page in parallel. Your lead is %LEAD%.
-Page: "%TITLE%" (%VIBE%)
-Original request: "%TASK%"
-Project folder (absolute path): %DIR%
-
-YOUR TASK, section "%ID%": %BRIEF%
-
-The full page, top to bottom: %ORDER%
-
-Files you own. Create only these:
-- %DIR%/sections/%ID%.html: an HTML fragment (no <html>, <head> or <body>) with ONE root element whose id="%ID%" (a <section>, or <header>/<nav>/<footer> if that fits better).
-- %DIR%/styles/%ID%.css: every selector scoped under #%ID% so you never clash with teammates.
-- %DIR%/scripts/%ID%.js: optional, only if your section needs JS. Wrap it in an IIFE.
-index.html is assembled automatically: never create or edit it, and never touch other agents' files.
-Start by reading %DIR%/styles/base.css and use its CSS variables everywhere.
-
-Team chat: to message someone, create a NEW file %DIR%/.swarm/outbox/%NAME%-<n>.msg (n = 1, 2, 3... never reuse a number). First line: "to: <name>" where name is a teammate, %LEAD%, all, or you (the human running the swarm). Then one or two short sentences. Messages for you are appended to %DIR%/.swarm/inbox/%NAME%.md. Message teammates when it matters to them: anchor ids the nav should link to, a shared visual motif, a variable you rely on. Before you finish, read your inbox (it may not exist yet, that's fine) and adapt, then message %LEAD% a one-line summary of what you shipped.
-
-Work fast and decisively. Make it look premium: strong typography, responsive down to 375px wide, tasteful motion that respects prefers-reduced-motion. End with a one-line summary. Later you may get follow-up tasks from %LEAD% or messages from the user in this same conversation.
-%TOOLS%"#;
-
-const REVIEW_PROMPT: &str = r#"Review time. You are %LEAD%, lead of the swarm. Project folder (absolute path): %DIR%
-index.html is generated automatically, do not edit it. It links styles/base.css, then styles/<id>.css, inlines sections/<id>.html and loads scripts/<id>.js for these ids, in order: %IDS%.
-
-Messages your team sent you:
-%MAIL%
-
-Review the files quickly and fix only real problems by editing the section, style and script files directly: nav links must point to ids that exist, selectors stay scoped to their section, base.css variables are used consistently, no broken markup, nothing overflows at 375px wide. Leave sections that are fine alone. Reply with a two-line summary of what you changed.
-%TOOLS%"#;
-
-const ROUTE_PROMPT: &str = r#"Message from the user (the human running this swarm): "%TEXT%"
-
-Project folder (absolute path): %DIR%. Page "%TITLE%" (%VIBE%). index.html is assembled automatically from styles/base.css (yours) plus, in this order: %ORDER%. Each section #<id> lives in sections/<id>.html, styles/<id>.css and optionally scripts/<id>.js, owned by one agent.
-Team right now: %TEAM%
-
-Decide how to handle this. Small global tweaks (palette, fonts, spacing in styles/base.css) or one-line fixes you can make yourself right now with your file tools. Changes inside a section go to its owner. Then reply with ONLY this JSON, no markdown fence and no commentary:
-{"reply": "<one or two sentences back to the user>", "tasks": [{"agent": "<name>", "task": "<the concrete change>"}], "new_sections": [{"id": "<kebab-case id>", "after": "<existing id it goes after, or \"\" to go before the footer>", "agent": "<name>", "brief": "<2-3 sentences>"}], "remove_sections": ["<id>"], "review": false}
-Rules: at most one task per agent (merge them). Never list yourself in tasks. Give new sections to agents that own nothing first, then to whoever has the least work. Set "review" to true only after big multi-section changes. If the user only asked a question or chatted, answer in "reply" and leave every array empty.
-%TOOLS%"#;
-
-const INTRO: &str = r#"You are %NAME%, an AI agent in a swarm building one web page together (lead: %LEAD%). Project folder (absolute path): %DIR%. Page "%TITLE%". Sections, top to bottom: %ORDER%.
-index.html is assembled automatically from styles/base.css (the lead's design system) plus sections/<id>.html, styles/<id>.css and scripts/<id>.js for each section: never edit index.html or files of sections you don't own, and scope every selector under your section's #id. Read styles/base.css before you style anything.
-Team chat: create a NEW file %DIR%/.swarm/outbox/%NAME%-<n>.msg with "to: <name|all|you>" on the first line and a short message after it. Your inbox is %DIR%/.swarm/inbox/%NAME%.md.
-%TOOLS%
-
-"#;
-
-const TASK_PROMPT: &str = r#"%INTRO%Task from %LEAD%: %TASK%
-You own %OWNS%. Make the change in your own files now, then reply with a one-line summary."#;
-
-const CHAT_PROMPT: &str = r#"%INTRO%Message from the user (the human running this swarm): "%TEXT%"
-You own %OWNS%. If they're asking for a change, make it in your own files now. Then answer them in one or two short sentences."#;
-
-/// Headless agents can't answer permission prompts, so steer each one to tools that won't be denied.
-fn tool_note(p: Provider) -> &'static str {
-    match p {
-        Provider::Claude => "Shell commands are not available in this run. Use only Read, Write, Edit, Glob and Grep, with absolute paths.",
-        Provider::Agy => "IMPORTANT: shell commands are blocked in this session (run_command is always denied). Use only your file tools (read, write and edit files) with absolute paths.",
-        Provider::Codex => "",
     }
 }
 
@@ -228,6 +170,12 @@ h1,h2,h3{line-height:1.08;letter-spacing:-.02em}
 "#;
 
 const FALLBACK_IDS: &[&str] = &["hero", "features", "showcase", "testimonials", "pricing", "faq", "cta", "gallery", "stats", "team"];
+
+fn strings(v: &Value) -> Vec<String> {
+    v.as_array()
+        .map(|a| a.iter().filter_map(|x| x.as_str()).map(|x| x.trim().to_string()).filter(|x| !x.is_empty()).collect())
+        .unwrap_or_default()
+}
 
 fn fill(template: &str, vars: &[(&str, &str)]) -> String {
     vars.iter().fold(template.to_string(), |s, (k, v)| s.replace(k, v))
@@ -298,17 +246,23 @@ pub fn default_dir(task: &str) -> PathBuf {
     cwd.join(format!("swarm-{}", slug(task)))
 }
 
-/// Create the project folder. A fresh build clears `.swarm/` (old mail would replay); a resume keeps it.
-pub fn prepare_dir(dir: &Path, fresh: bool) -> std::io::Result<PathBuf> {
+/// Create the project folder. A fresh run clears `.swarm/` (old mail would replay); a resume keeps
+/// it. Code mode leaves the project's own layout alone.
+pub fn prepare_dir(dir: &Path, fresh: bool, kind: Kind) -> std::io::Result<PathBuf> {
     std::fs::create_dir_all(dir)?;
     let dir = dir.canonicalize()?;
     let meta = dir.join(".swarm");
     if fresh && meta.exists() {
         std::fs::remove_dir_all(&meta)?;
     }
-    for sub in [".swarm/outbox", ".swarm/inbox", "sections", "styles", "scripts"] {
+    let subs: &[&str] = match kind {
+        Kind::Page => &[".swarm/outbox", ".swarm/inbox", "sections", "styles", "scripts"],
+        Kind::Code => &[".swarm/outbox", ".swarm/inbox"],
+    };
+    for sub in subs {
         std::fs::create_dir_all(dir.join(sub))?;
     }
+    project::git_exclude(&dir);
     Ok(dir)
 }
 
@@ -376,10 +330,18 @@ fn json_in(text: &str) -> Option<Value> {
     serde_json::from_str(text.get(start..=end)?).ok()
 }
 
-fn parse_plan(text: &str, workers: &[String]) -> Option<(String, String, Vec<PlanItem>)> {
+struct Plan {
+    title: String,
+    vibe: String,
+    items: Vec<PlanItem>,
+    check: Option<String>,
+}
+
+fn parse_plan(text: &str, workers: &[String], kind: Kind) -> Option<Plan> {
     let v = json_in(text)?;
     let title = v["title"].as_str().unwrap_or("Swarm build").to_string();
-    let vibe = v["vibe"].as_str().unwrap_or("").to_string();
+    let vibe = v["vibe"].as_str().or(v["summary"].as_str()).unwrap_or("").to_string();
+    let check = v["check"].as_str().map(|c| c.trim().to_string()).filter(|c| !c.is_empty() && c.len() < 300);
     let mut items = Vec::new();
     let mut used_agents = HashSet::new();
     let mut used_ids = HashSet::new();
@@ -390,10 +352,14 @@ fn parse_plan(text: &str, workers: &[String]) -> Option<(String, String, Vec<Pla
             continue;
         }
         let id = unique_id(t["id"].as_str().unwrap_or("section"), &mut used_ids);
-        items.push(PlanItem { id, agent: name.clone(), brief: t["brief"].as_str().unwrap_or("").to_string() });
+        items.push(PlanItem { id, agent: name.clone(), brief: t["brief"].as_str().unwrap_or("").to_string(), owns: strings(&t["owns"]) });
     }
     if items.is_empty() {
         return None;
+    }
+    if kind == Kind::Code {
+        // in code mode nobody gets invented work; the lead can hand it out later
+        return Some(Plan { title, vibe, items, check });
     }
     // anyone the lead forgot still gets work
     let mut spare = FALLBACK_IDS.iter().filter(|i| !used_ids.contains(**i));
@@ -404,9 +370,9 @@ fn parse_plan(text: &str, workers: &[String]) -> Option<(String, String, Vec<Pla
         let id = spare.next().map(|s| s.to_string()).unwrap_or_else(|| format!("extra-{}", items.len() + 1));
         let brief = format!("Add a {id} section that fits the rest of the page.");
         let at = items.len().saturating_sub(1).max(1).min(items.len());
-        items.insert(at, PlanItem { id, agent: name.clone(), brief });
+        items.insert(at, PlanItem { id, agent: name.clone(), brief, owns: Vec::new() });
     }
-    Some((title, vibe, items))
+    Some(Plan { title, vibe, items, check })
 }
 
 fn unique_id(raw: &str, used: &mut HashSet<String>) -> String {
@@ -423,7 +389,24 @@ fn unique_id(raw: &str, used: &mut HashSet<String>) -> String {
     id
 }
 
-fn fallback_plan(task: &str, workers: &[String]) -> (String, String, Vec<PlanItem>) {
+fn fallback_plan(task: &str, workers: &[String], kind: Kind) -> Plan {
+    if kind == Kind::Code {
+        let items = workers
+            .iter()
+            .enumerate()
+            .map(|(k, w)| PlanItem {
+                id: format!("part-{}", k + 1),
+                agent: w.clone(),
+                brief: format!(
+                    "Take part {} of {} of this request, agree on the split with your teammates over team chat first: {task}",
+                    k + 1,
+                    workers.len()
+                ),
+                owns: Vec::new(),
+            })
+            .collect();
+        return Plan { title: trunc(task, 60), vibe: String::new(), items, check: None };
+    }
     let n = workers.len();
     let mut ids: Vec<String> = FALLBACK_IDS.iter().take(n.saturating_sub(1)).map(|s| s.to_string()).collect();
     while ids.len() + 1 < n {
@@ -438,9 +421,9 @@ fn fallback_plan(task: &str, workers: &[String]) -> (String, String, Vec<PlanIte
     let items = workers
         .iter()
         .zip(ids)
-        .map(|(s, id)| PlanItem { brief: format!("Build the {id} section for: {task}"), id, agent: s.clone() })
+        .map(|(s, id)| PlanItem { brief: format!("Build the {id} section for: {task}"), id, agent: s.clone(), owns: Vec::new() })
         .collect();
-    (trunc(task, 60), "bold, modern, dark".into(), items)
+    Plan { title: trunc(task, 60), vibe: "bold, modern, dark".into(), items, check: None }
 }
 
 fn ensure_base_css(dir: &Path) {
@@ -495,42 +478,25 @@ pub fn open(target: &str) -> bool {
     std::process::Command::new(opener).arg(target).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn().is_ok()
 }
 
-fn walk(dir: &Path, depth: usize, out: &mut Vec<(PathBuf, SystemTime, u64)>) {
-    let Ok(rd) = std::fs::read_dir(dir) else { return };
-    for e in rd.flatten() {
-        let p = e.path();
-        if e.file_name().to_string_lossy().starts_with('.') {
-            continue;
-        }
-        let Ok(m) = e.metadata() else { continue };
-        if m.is_dir() {
-            if depth < 4 {
-                walk(&p, depth + 1, out);
-            }
-        } else {
-            out.push((p, m.modified().unwrap_or(SystemTime::UNIX_EPOCH), m.len()));
-        }
-    }
-}
-
-/// Polls the project folder: reports new/changed files, re-assembles index.html, bumps the
-/// preview version.
-pub async fn watch_files(dir: PathBuf, tx: Tx, shared: Shared) {
+/// Polls the project folder: reports new/changed files, re-assembles index.html (page mode), bumps
+/// the preview version. In code mode the files that were already there aren't news.
+pub async fn watch_files(dir: PathBuf, tx: Tx, shared: Shared, kind: Kind) {
     let mut seen: HashMap<PathBuf, (SystemTime, u64)> = HashMap::new();
     let mut first = true;
     loop {
-        tokio::time::sleep(Duration::from_millis(500)).await;
-        let mut files = Vec::new();
-        walk(&dir, 0, &mut files);
+        tokio::time::sleep(Duration::from_millis(if kind == Kind::Code { 800 } else { 500 })).await;
         let mut src_changed = false;
         let mut any = false;
-        for (path, mtime, len) in files {
+        for (path, mtime, len) in project::scan(&dir, 50_000) {
             let prev = seen.get(&path).copied();
             if prev == Some((mtime, len)) {
                 continue;
             }
             seen.insert(path.clone(), (mtime, len));
             any = true;
+            if first && kind == Kind::Code {
+                continue;
+            }
             let rel = path.strip_prefix(&dir).map(|p| p.to_string_lossy().to_string()).unwrap_or_default();
             if ["sections/", "styles/", "scripts/"].iter().any(|p| rel.starts_with(p)) {
                 src_changed = true;
@@ -538,7 +504,7 @@ pub async fn watch_files(dir: PathBuf, tx: Tx, shared: Shared) {
             let _ = tx.send(Ev::File { path: rel, bytes: len, new: prev.is_none() && !first });
         }
         first = false;
-        if src_changed {
+        if src_changed && kind == Kind::Page {
             let page = shared.page.lock().unwrap().clone();
             if let Some(p) = page {
                 assemble(&dir, &p);
@@ -621,20 +587,26 @@ pub async fn watch_outbox(dir: PathBuf, tx: Tx, shared: Shared) {
 
 // ── the run ──────────────────────────────────────────────────────────────────────────────
 
+/// How many times a failing check goes back to the team before the round ships anyway.
+const MAX_FIX: u32 = 3;
+
 #[derive(Clone, Debug)]
 enum Job {
     Plan,
     Review,
     Route,
-    Build(String),
+    /// Build a section / task; the time is when it was handed out (code mode checks for changes since).
+    Build(String, SystemTime),
     Task,
     Chat,
+    /// The lead deciding what to do about a failed check.
+    Fix,
 }
 
 impl Job {
     /// Work the current round waits for before it can ship.
     fn gates(&self) -> bool {
-        matches!(self, Job::Build(_) | Job::Task)
+        matches!(self, Job::Build(..) | Job::Task)
     }
 }
 
@@ -656,6 +628,8 @@ enum Stage {
     Routing,
     Building,
     Reviewing,
+    Checking,
+    Fixing,
 }
 
 struct Orch {
@@ -674,9 +648,21 @@ struct Orch {
     stopping: bool,
     mail_seen: usize,
     preview: Option<String>,
+    /// What the lead proposed as the check, waiting for the user's `/check`.
+    suggested: Option<String>,
+    fix_attempts: u32,
+    check_task: Option<tokio::task::AbortHandle>,
+    /// The running command gates the round (true) or is a one-off `/run` (false).
+    check_gates: bool,
+    /// Agents changed something since the last ship; a passing check alone isn't a new round.
+    round_work: bool,
 }
 
 impl Orch {
+    fn code(&self) -> bool {
+        self.cfg.kind == Kind::Code
+    }
+
     fn dir_s(&self) -> String {
         self.cfg.dir.to_string_lossy().to_string()
     }
@@ -717,16 +703,34 @@ impl Orch {
         if self.items.is_empty() {
             return "(nothing yet)".into();
         }
+        if self.code() {
+            return self
+                .items
+                .iter()
+                .map(|p| {
+                    let files = if p.owns.is_empty() { "files to be agreed".to_string() } else { p.owns.join(", ") };
+                    format!("#{} ({}: {files})", p.id, p.agent)
+                })
+                .collect::<Vec<_>>()
+                .join("; ");
+        }
         self.items.iter().map(|p| format!("#{} ({})", p.id, p.agent)).collect::<Vec<_>>().join(" → ")
     }
 
     fn owns(&self, name: &str) -> String {
-        let ids: Vec<String> = self.items.iter().filter(|i| i.agent == name).map(|i| format!("#{}", i.id)).collect();
-        if ids.is_empty() {
-            "no section yet".into()
-        } else {
-            format!("{} (sections/<id>.html, styles/<id>.css, scripts/<id>.js)", ids.join(", "))
+        let mine: Vec<&PlanItem> = self.items.iter().filter(|i| i.agent == name).collect();
+        if mine.is_empty() {
+            return if self.code() { "no files yet".into() } else { "no section yet".into() };
         }
+        if self.code() {
+            return mine
+                .iter()
+                .map(|i| format!("#{} ({})", i.id, if i.owns.is_empty() { "files to be agreed".to_string() } else { i.owns.join(", ") }))
+                .collect::<Vec<_>>()
+                .join(", ");
+        }
+        let ids: Vec<String> = mine.iter().map(|i| format!("#{}", i.id)).collect();
+        format!("{} (sections/<id>.html, styles/<id>.css, scripts/<id>.js)", ids.join(", "))
     }
 
     fn team(&self) -> String {
@@ -743,13 +747,28 @@ impl Orch {
             .join("; ")
     }
 
+    /// The check line for the lead's prompts.
+    fn check_note_lead(&self) -> String {
+        match &self.cfg.check {
+            Some(c) => format!("The user approved this check command; swarm runs it after every round and sends failures back: `{c}`."),
+            None => "There is no check command yet; propose one in your JSON (the user approves it before swarm ever runs it).".into(),
+        }
+    }
+
+    fn check_note_worker(&self) -> String {
+        match &self.cfg.check {
+            Some(c) => format!("After every round swarm runs `{c}` for you; failures come back to whoever owns the broken code."),
+            None => String::new(),
+        }
+    }
+
     fn intro(&self, idx: usize) -> String {
         if self.slots[idx].briefed {
             return String::new();
         }
         let s = &self.slots[idx].spec;
         fill(
-            INTRO,
+            if self.code() { CODE_INTRO } else { INTRO },
             &[
                 ("%NAME%", &s.name),
                 ("%LEAD%", &self.lead().name),
@@ -764,8 +783,14 @@ impl Orch {
     fn build_prompt(&self, idx: usize, it: &PlanItem) -> String {
         let me = &self.slots[idx].spec;
         let n = self.slots.len().to_string();
+        let owns = if it.owns.is_empty() {
+            "the files for this task (agree on paths with your teammates first)".to_string()
+        } else {
+            it.owns.join(", ")
+        };
+        let check = self.check_note_worker();
         let mut p = fill(
-            WORKER_PROMPT,
+            if self.code() { CODE_WORKER_PROMPT } else { WORKER_PROMPT },
             &[
                 ("%NAME%", &me.name),
                 ("%N%", &n),
@@ -776,13 +801,16 @@ impl Orch {
                 ("%DIR%", &self.dir_s()),
                 ("%ID%", &it.id),
                 ("%BRIEF%", &it.brief),
+                ("%OWNS%", &owns),
                 ("%ORDER%", &self.order()),
+                ("%CHECK%", &check),
                 ("%TOOLS%", tool_note(me.provider)),
             ],
         );
         let others: Vec<String> = self.items.iter().filter(|i| i.agent == me.name && i.id != it.id).map(|i| format!("#{}", i.id)).collect();
         if !others.is_empty() {
-            p = format!("{p}\nYou still own {} as well; this is an additional section.", others.join(", "));
+            let what = if self.code() { "task" } else { "section" };
+            p = format!("{p}\nYou still own {} as well; this is an additional {what}.", others.join(", "));
         }
         p
     }
@@ -791,10 +819,17 @@ impl Orch {
         Page { title: self.title.clone(), ids: self.items.iter().map(|i| i.id.clone()).collect(), placeholders }
     }
 
-    fn publish_plan(&mut self, placeholders: bool) {
+    fn assemble(&self, placeholders: bool) {
+        if self.code() {
+            return;
+        }
         let page = self.page(placeholders);
         *self.shared.page.lock().unwrap() = Some(page.clone());
         assemble(&self.cfg.dir, &page);
+    }
+
+    fn publish_plan(&mut self, placeholders: bool) {
+        self.assemble(placeholders);
         let _ = self.tx.send(Ev::Plan(self.title.clone(), self.items.clone()));
         self.save();
     }
@@ -808,6 +843,8 @@ impl Orch {
             review: self.cfg.review,
             agents: self.slots.iter().map(|s| SavedAgent { spec: s.spec.clone(), session: s.session.clone(), cost: s.cost }).collect(),
             plan: self.items.clone(),
+            kind: self.cfg.kind,
+            check: self.cfg.check.clone(),
         };
         st.save(&self.cfg.dir);
     }
@@ -830,16 +867,21 @@ impl Orch {
         let lead = self.lead().clone();
         let workers = self.workers();
         if workers.is_empty() {
-            // solo run: the lead builds the whole page itself
-            ensure_base_css(&self.cfg.dir);
+            // solo run: the lead does all of it
+            let (id, brief) = if self.code() {
+                ("all".to_string(), format!("Do the whole request yourself: {}", self.cfg.task))
+            } else {
+                ensure_base_css(&self.cfg.dir);
+                ("page".to_string(), format!("Build the whole page: {}", self.cfg.task))
+            };
             self.title = trunc(&self.cfg.task, 60);
-            self.items =
-                vec![PlanItem { id: "page".into(), agent: lead.name.clone(), brief: format!("Build the whole page: {}", self.cfg.task) }];
+            let owns = if self.code() { vec!["**".to_string()] } else { Vec::new() };
+            self.items = vec![PlanItem { id, agent: lead.name.clone(), brief, owns }];
             self.publish_plan(true);
             self.go_build();
             let it = self.items[0].clone();
             let p = self.build_prompt(0, &it);
-            self.dispatch(0, Job::Build(it.id.clone()), format!("build #{}", it.id), p);
+            self.dispatch(0, Job::Build(it.id.clone(), SystemTime::now()), format!("build #{}", it.id), p);
             return;
         }
         self.stage = Stage::Planning;
@@ -852,17 +894,33 @@ impl Orch {
             .map(|s| format!("{} ({} {})", s.spec.name, s.spec.provider.label(), s.spec.model_label()))
             .collect::<Vec<_>>()
             .join(", ");
-        let prompt = fill(
-            PLAN_PROMPT,
-            &[
-                ("%LEAD%", &lead.name),
-                ("%TASK%", &self.cfg.task),
-                ("%DIR%", &self.dir_s()),
-                ("%TEAM%", &team),
-                ("%TOOLS%", tool_note(lead.provider)),
-            ],
-        );
-        self.dispatch(0, Job::Plan, "plan the page".into(), prompt);
+        let prompt = if self.code() {
+            fill(
+                CODE_PLAN_PROMPT,
+                &[
+                    ("%LEAD%", &lead.name),
+                    ("%TASK%", &self.cfg.task),
+                    ("%DIR%", &self.dir_s()),
+                    ("%STATE%", &project::overview(&self.cfg.dir)),
+                    ("%TEAM%", &team),
+                    ("%CHECK%", &self.check_note_lead()),
+                    ("%TOOLS%", tool_note(lead.provider)),
+                ],
+            )
+        } else {
+            fill(
+                PLAN_PROMPT,
+                &[
+                    ("%LEAD%", &lead.name),
+                    ("%TASK%", &self.cfg.task),
+                    ("%DIR%", &self.dir_s()),
+                    ("%TEAM%", &team),
+                    ("%TOOLS%", tool_note(lead.provider)),
+                ],
+            )
+        };
+        let label = if self.code() { "plan the work" } else { "plan the page" };
+        self.dispatch(0, Job::Plan, label.into(), prompt);
     }
 
     fn resume(&mut self, st: State) {
@@ -887,10 +945,14 @@ impl Orch {
     }
 
     fn go_build(&mut self) {
+        if !matches!(self.stage, Stage::Building | Stage::Fixing) {
+            self.fix_attempts = 0;
+        }
         self.stage = Stage::Building;
+        self.round_work = true;
         self.phase(Phase::Build);
         if self.cfg.live {
-            if let Some(url) = &self.preview {
+            if let Some(url) = self.preview.as_ref().filter(|u| !u.is_empty()) {
                 open(url);
             }
             self.cfg.live = false;
@@ -921,6 +983,7 @@ impl Orch {
                 }
                 self.maybe_finish();
             }
+            Note::Check(ok, tail) => self.checked(ok, tail),
         }
     }
 
@@ -933,13 +996,11 @@ impl Orch {
                 self.idle();
             }
             Job::Plan => self.planned(result).await,
-            Job::Build(id) => {
-                // "success" without the section file on disk is still a failure
-                let result = result.and_then(|t| {
-                    if self.cfg.dir.join(format!("sections/{id}.html")).exists() {
-                        Ok(t)
-                    } else {
-                        let e = format!("finished without writing sections/{id}.html");
+            Job::Build(id, since) => {
+                // "success" without the work on disk is still a failure
+                let result = result.and_then(|t| match self.missing_work(&id, since) {
+                    None => Ok(t),
+                    Some(e) => {
                         let _ = self.tx.send(Ev::Agent(idx, AgentEv::Fail(e.clone())));
                         Err(e)
                     }
@@ -964,6 +1025,7 @@ impl Orch {
                 Err(_) => {}
             },
             Job::Route => self.routed(result),
+            Job::Fix => self.fixing(result),
             Job::Review => {
                 if let Ok(t) = &result {
                     let first = t.lines().find(|l| !l.trim().is_empty()).unwrap_or("").trim();
@@ -972,8 +1034,10 @@ impl Orch {
                     }
                 }
                 if self.stage == Stage::Reviewing {
-                    if self.waiting.is_empty() {
-                        self.ship();
+                    if stopped || self.stopping {
+                        self.idle();
+                    } else if self.waiting.is_empty() {
+                        self.after_build();
                     } else {
                         self.stage = Stage::Building;
                         self.review_after = false;
@@ -984,32 +1048,63 @@ impl Orch {
         }
     }
 
+    /// Why a finished build turn doesn't count, if it doesn't.
+    fn missing_work(&self, id: &str, since: SystemTime) -> Option<String> {
+        if !self.code() {
+            let ok = self.cfg.dir.join(format!("sections/{id}.html")).exists();
+            return (!ok).then(|| format!("finished without writing sections/{id}.html"));
+        }
+        let it = self.items.iter().find(|i| i.id == id)?;
+        if it.owns.is_empty() || project::changed_since(&self.cfg.dir, &it.owns, since) {
+            return None;
+        }
+        Some(format!("finished without changing any of its files ({})", trunc(&it.owns.join(", "), 50)))
+    }
+
     async fn planned(&mut self, result: Result<String, String>) {
         let workers = self.workers();
-        let (title, vibe, items) = match result.as_deref().ok().and_then(|t| parse_plan(t, &workers)) {
+        let plan = match result.as_deref().ok().and_then(|t| parse_plan(t, &workers, self.cfg.kind)) {
             Some(p) => p,
             None => {
-                self.log(Level::Warn, "plan unreadable, using the default section split");
-                fallback_plan(&self.cfg.task, &workers)
+                self.log(Level::Warn, "plan unreadable, using a default split");
+                fallback_plan(&self.cfg.task, &workers, self.cfg.kind)
             }
         };
-        ensure_base_css(&self.cfg.dir);
-        self.title = title;
-        self.vibe = vibe;
-        self.items = items.clone();
+        if !self.code() {
+            ensure_base_css(&self.cfg.dir);
+        }
+        self.title = plan.title;
+        self.vibe = plan.vibe;
+        self.items = plan.items.clone();
         self.publish_plan(true);
+        if let Some(c) = plan.check {
+            self.suggest(c);
+        }
         let lead = self.lead().name.clone();
-        for it in &items {
-            self.msg(&lead, &it.agent, format!("you own #{}: {}", it.id, trunc(&it.brief, 110)));
+        for it in &plan.items {
+            let what = if self.code() && !it.owns.is_empty() { format!(" [{}]", trunc(&it.owns.join(", "), 50)) } else { String::new() };
+            self.msg(&lead, &it.agent, format!("you own #{}{what}: {}", it.id, trunc(&it.brief, 110)));
             tokio::time::sleep(Duration::from_millis(140)).await;
         }
         self.go_build();
         self.review_after = self.cfg.review;
-        for it in &items {
+        for it in &plan.items {
             let Some(idx) = self.index(&it.agent) else { continue };
             let p = self.build_prompt(idx, it);
-            self.dispatch(idx, Job::Build(it.id.clone()), format!("build #{}", it.id), p);
+            self.dispatch(idx, Job::Build(it.id.clone(), SystemTime::now()), format!("build #{}", it.id), p);
         }
+    }
+
+    /// The lead proposed a check command. Nothing runs until the user accepts it.
+    fn suggest(&mut self, cmd: String) {
+        if self.cfg.check.as_deref() == Some(cmd.as_str()) {
+            return;
+        }
+        if self.cfg.check.is_none() {
+            self.log(Level::Warn, format!("{} suggests the check `{cmd}` · type /check to accept it", self.lead().name));
+        }
+        self.suggested = Some(cmd.clone());
+        let _ = self.tx.send(Ev::CheckSuggest(cmd));
     }
 
     /// A dead worker gets replaced once by a fresh Claude worker.
@@ -1036,7 +1131,7 @@ impl Orch {
         self.publish_plan(true);
         let Some(it) = self.items.iter().find(|i| i.id == id).cloned() else { return };
         let p = self.build_prompt(ridx, &it);
-        self.dispatch(ridx, Job::Build(id.to_string()), format!("take over #{id}"), p);
+        self.dispatch(ridx, Job::Build(id.to_string(), SystemTime::now()), format!("take over #{id}"), p);
     }
 
     fn fresh_name(&self, word: &str) -> String {
@@ -1047,6 +1142,34 @@ impl Orch {
                 return name;
             }
             n += 1;
+        }
+    }
+
+    /// Parse the lead's `"tasks"` array: one merged task per worker.
+    fn tasks_in(&self, v: &Value) -> Vec<(usize, String)> {
+        let mut tasks: Vec<(usize, String)> = Vec::new();
+        for t in v["tasks"].as_array().cloned().unwrap_or_default() {
+            let (Some(agent), Some(task)) = (t["agent"].as_str(), t["task"].as_str()) else { continue };
+            let Some(idx) = self.index(agent).filter(|&i| i != 0) else { continue };
+            match tasks.iter_mut().find(|(i, _)| *i == idx) {
+                Some((_, prev)) => {
+                    prev.push(' ');
+                    prev.push_str(task);
+                }
+                None => tasks.push((idx, task.to_string())),
+            }
+        }
+        tasks
+    }
+
+    fn send_tasks(&mut self, tasks: Vec<(usize, String)>) {
+        let lead = self.lead().name.clone();
+        for (idx, task) in tasks {
+            let name = self.slots[idx].spec.name.clone();
+            self.msg(&lead, &name, trunc(&task, 140));
+            let owns = self.owns(&name);
+            let p = fill(TASK_PROMPT, &[("%INTRO%", &self.intro(idx)), ("%LEAD%", &lead), ("%TASK%", &task), ("%OWNS%", &owns)]);
+            self.dispatch(idx, Job::Task, format!("task from {lead}"), p);
         }
     }
 
@@ -1077,6 +1200,9 @@ impl Orch {
         if !reply.is_empty() {
             self.msg(&lead, "you", trunc(&reply, 400));
         }
+        if let Some(c) = v["check"].as_str().map(str::trim).filter(|c| !c.is_empty()) {
+            self.suggest(c.to_string());
+        }
 
         let mut changed_plan = false;
         if let Some(rm) = v["remove_sections"].as_array() {
@@ -1091,17 +1217,20 @@ impl Orch {
 
         let mut builds: Vec<(usize, PlanItem)> = Vec::new();
         let mut used: HashSet<String> = self.items.iter().map(|i| i.id.clone()).collect();
-        for ns in v["new_sections"].as_array().cloned().unwrap_or_default() {
-            let id = unique_id(ns["id"].as_str().unwrap_or("section"), &mut used);
+        let key = if self.code() { "new_tasks" } else { "new_sections" };
+        for ns in v[key].as_array().cloned().unwrap_or_default() {
+            let id = unique_id(ns["id"].as_str().unwrap_or("task"), &mut used);
             let Some(idx) = self.pick_owner(ns["agent"].as_str().unwrap_or(""), &builds) else { continue };
             let it = PlanItem {
                 id: id.clone(),
                 agent: self.slots[idx].spec.name.clone(),
                 brief: ns["brief"].as_str().unwrap_or("").to_string(),
+                owns: strings(&ns["owns"]),
             };
             let after = ns["after"].as_str().map(sanitize_id).unwrap_or_default();
             let at = match self.items.iter().position(|i| i.id == after) {
                 Some(p) if !after.is_empty() => p + 1,
+                _ if self.code() => self.items.len(),
                 _ => match self.items.iter().position(|i| i.id == "footer") {
                     Some(f) => f,
                     None => self.items.len(),
@@ -1112,19 +1241,7 @@ impl Orch {
             changed_plan = true;
         }
 
-        let mut tasks: Vec<(usize, String)> = Vec::new();
-        for t in v["tasks"].as_array().cloned().unwrap_or_default() {
-            let (Some(agent), Some(task)) = (t["agent"].as_str(), t["task"].as_str()) else { continue };
-            let Some(idx) = self.index(agent).filter(|&i| i != 0) else { continue };
-            match tasks.iter_mut().find(|(i, _)| *i == idx) {
-                Some((_, prev)) => {
-                    prev.push(' ');
-                    prev.push_str(task);
-                }
-                None => tasks.push((idx, task.to_string())),
-            }
-        }
-
+        let tasks = self.tasks_in(&v);
         if changed_plan {
             self.publish_plan(true);
         }
@@ -1144,21 +1261,16 @@ impl Orch {
         }
         for (idx, it) in builds {
             let name = self.slots[idx].spec.name.clone();
-            self.msg(&lead, &name, format!("new section #{}: {}", it.id, trunc(&it.brief, 100)));
+            let what = if self.code() { "new task" } else { "new section" };
+            self.msg(&lead, &name, format!("{what} #{}: {}", it.id, trunc(&it.brief, 100)));
             let p = self.build_prompt(idx, &it);
-            self.dispatch(idx, Job::Build(it.id.clone()), format!("build #{}", it.id), p);
+            self.dispatch(idx, Job::Build(it.id.clone(), SystemTime::now()), format!("build #{}", it.id), p);
         }
-        for (idx, task) in tasks {
-            let name = self.slots[idx].spec.name.clone();
-            self.msg(&lead, &name, trunc(&task, 140));
-            let owns = self.owns(&name);
-            let p = fill(TASK_PROMPT, &[("%INTRO%", &self.intro(idx)), ("%LEAD%", &lead), ("%TASK%", &task), ("%OWNS%", &owns)]);
-            self.dispatch(idx, Job::Task, format!("task from {lead}"), p);
-        }
+        self.send_tasks(tasks);
     }
 
-    /// Who builds a new section: the lead's pick if it names a worker, else an idle worker with the
-    /// fewest sections.
+    /// Who builds a new section or task: the lead's pick if it names a worker, else the worker with
+    /// the least work.
     fn pick_owner(&self, wanted: &str, planned: &[(usize, PlanItem)]) -> Option<usize> {
         if let Some(i) = self.index(wanted).filter(|&i| i != 0) {
             return Some(i);
@@ -1176,9 +1288,7 @@ impl Orch {
         if self.stage != Stage::Building || !self.waiting.is_empty() {
             return;
         }
-        let page = self.page(false);
-        *self.shared.page.lock().unwrap() = Some(page.clone());
-        assemble(&self.cfg.dir, &page);
+        self.assemble(false);
         if self.stopping {
             self.log(Level::Warn, format!("round {} stopped", self.round));
             self.idle();
@@ -1187,7 +1297,15 @@ impl Orch {
         if self.review_after && self.slots.len() > 1 {
             self.review();
         } else {
-            self.ship();
+            self.after_build();
+        }
+    }
+
+    /// Everyone's done (and reviewed): prove it works if there's a check, else ship.
+    fn after_build(&mut self) {
+        match self.cfg.check.clone() {
+            Some(cmd) => self.start_check(cmd, true),
+            None => self.ship(),
         }
     }
 
@@ -1207,21 +1325,169 @@ impl Orch {
             fresh
         };
         let mail = if mail.is_empty() { "(none)".to_string() } else { mail.join("\n") };
-        let ids = self.items.iter().map(|i| i.id.clone()).collect::<Vec<_>>().join(", ");
+        let prompt = if self.code() {
+            fill(
+                CODE_REVIEW_PROMPT,
+                &[
+                    ("%LEAD%", &lead.name),
+                    ("%DIR%", &self.dir_s()),
+                    ("%ORDER%", &self.order()),
+                    ("%MAIL%", &mail),
+                    ("%TOOLS%", tool_note(lead.provider)),
+                ],
+            )
+        } else {
+            let ids = self.items.iter().map(|i| i.id.clone()).collect::<Vec<_>>().join(", ");
+            fill(
+                REVIEW_PROMPT,
+                &[
+                    ("%LEAD%", &lead.name),
+                    ("%DIR%", &self.dir_s()),
+                    ("%IDS%", &ids),
+                    ("%MAIL%", &mail),
+                    ("%TOOLS%", tool_note(lead.provider)),
+                ],
+            )
+        };
+        let label = if self.code() { "review the work" } else { "review the page" };
+        self.dispatch(0, Job::Review, label.into(), prompt);
+    }
+
+    // ── the check ───────────────────────────────────────────────────────────────────────
+
+    fn start_check(&mut self, cmd: String, gates: bool) {
+        if let Some(h) = self.check_task.take() {
+            h.abort();
+        }
+        if gates {
+            self.stage = Stage::Checking;
+            self.phase(Phase::Check);
+        }
+        self.check_gates = gates;
+        let label = if !gates {
+            "run".to_string()
+        } else if self.fix_attempts == 0 {
+            "check".to_string()
+        } else {
+            format!("re-check · after fix {}/{MAX_FIX}", self.fix_attempts)
+        };
+        self.log(Level::Info, format!("$ {cmd}"));
+        let _ = self.tx.send(Ev::CheckStart { cmd: cmd.clone(), label });
+        let h = tokio::spawn(project::run_check(self.cfg.dir.clone(), cmd, self.tx.clone(), self.notes.clone()));
+        self.check_task = Some(h.abort_handle());
+    }
+
+    fn checked(&mut self, ok: bool, tail: String) {
+        self.check_task = None;
+        let gates = std::mem::replace(&mut self.check_gates, false);
+        if !gates {
+            self.log(if ok { Level::Good } else { Level::Bad }, if ok { "command finished" } else { "command failed" });
+            return;
+        }
+        if self.stage != Stage::Checking {
+            return;
+        }
+        if ok {
+            self.log(Level::Good, "check passed");
+            if self.round_work {
+                self.ship();
+            } else {
+                self.idle();
+            }
+            return;
+        }
+        if self.fix_attempts >= MAX_FIX || self.stopping {
+            self.log(Level::Bad, format!("check still failing after {MAX_FIX} fix rounds · shipping as is"));
+            self.ship();
+            return;
+        }
+        self.fix_attempts += 1;
+        self.stage = Stage::Fixing;
+        let lead = self.lead().clone();
+        let tail: String = {
+            let lines: Vec<&str> = tail.lines().collect();
+            let keep = lines[lines.len().saturating_sub(60)..].join("\n");
+            let n = keep.chars().count();
+            if n > 5000 {
+                keep.chars().skip(n - 5000).collect()
+            } else {
+                keep
+            }
+        };
+        let cmd = self.cfg.check.clone().unwrap_or_default();
         let prompt = fill(
-            REVIEW_PROMPT,
-            &[("%LEAD%", &lead.name), ("%DIR%", &self.dir_s()), ("%IDS%", &ids), ("%MAIL%", &mail), ("%TOOLS%", tool_note(lead.provider))],
+            FIX_PROMPT,
+            &[
+                ("%CMD%", &cmd),
+                ("%K%", &self.fix_attempts.to_string()),
+                ("%MAX%", &MAX_FIX.to_string()),
+                ("%TAIL%", &tail),
+                ("%ORDER%", &self.order()),
+                ("%TOOLS%", tool_note(lead.provider)),
+            ],
         );
-        self.dispatch(0, Job::Review, "review the page".into(), prompt);
+        self.log(Level::Warn, format!("check failed · fix round {}/{MAX_FIX}", self.fix_attempts));
+        self.dispatch(0, Job::Fix, format!("fix the check · {}/{MAX_FIX}", self.fix_attempts), prompt);
+    }
+
+    /// The lead looked at a failed check: hand the fixes out, or re-check if it fixed it alone.
+    fn fixing(&mut self, result: Result<String, String>) {
+        let lead = self.lead().name.clone();
+        let text = match result {
+            Ok(t) => t,
+            Err(e) => {
+                if e != "stopped" {
+                    self.msg(&lead, "you", format!("I couldn't work on the failing check: {}", trunc(&e, 120)));
+                }
+                if self.stage == Stage::Fixing {
+                    self.idle();
+                }
+                return;
+            }
+        };
+        if self.stage != Stage::Fixing {
+            return;
+        }
+        // the lead may have fixed things itself, so this round has work in it either way
+        self.round_work = true;
+        let v = json_in(&text).unwrap_or(Value::Null);
+        let reply = v["reply"].as_str().map(String::from).unwrap_or_else(|| trunc(text.trim(), 200));
+        if !reply.trim().is_empty() {
+            self.msg(&lead, "you", trunc(reply.trim(), 300));
+        }
+        let tasks = self.tasks_in(&v);
+        if tasks.is_empty() {
+            if let Some(cmd) = self.cfg.check.clone() {
+                self.start_check(cmd, true);
+            }
+            return;
+        }
+        self.go_build();
+        self.review_after = false;
+        self.send_tasks(tasks);
     }
 
     fn ship(&mut self) {
-        let page = self.page(false);
-        *self.shared.page.lock().unwrap() = Some(page.clone());
-        assemble(&self.cfg.dir, &page);
+        self.assemble(false);
+        if self.code() && self.preview.is_none() && self.cfg.dir.join("index.html").exists() {
+            // the project turned out to be a web app; serve it like a page
+            let (dir, version, tx) = (self.cfg.dir.clone(), self.shared.version.clone(), self.tx.clone());
+            tokio::spawn(async move {
+                if let Some(url) = crate::server::start(dir, version).await {
+                    let _ = tx.send(Ev::Server(url));
+                }
+            });
+            self.preview = Some(String::new());
+        }
+        if self.code() {
+            if let Some(stat) = project::diff_stat(&self.cfg.dir) {
+                self.log(Level::Info, format!("git: {stat}"));
+            }
+        }
         self.phase(Phase::Ship);
         let _ = self.tx.send(Ev::Shipped(self.round));
         self.round += 1;
+        self.round_work = false;
         self.stage = Stage::Idle;
         self.stopping = false;
         self.save();
@@ -1261,7 +1527,8 @@ impl Orch {
                     self.tx.send(Ev::Spawn(spec.clone(), format!("joined the swarm ({} {})", spec.provider.label(), spec.model_label())));
                 self.add_slot(spec, None, 0.0, false);
                 let lead = self.lead().name.clone();
-                self.msg(&lead, &name, "welcome aboard. Stand by for a section.");
+                let what = if self.code() { "some files" } else { "a section" };
+                self.msg(&lead, &name, format!("welcome aboard. Stand by for {what}."));
                 self.save();
             }
             Cmd::Stop(who) => match who.and_then(|w| self.index(&w)) {
@@ -1271,6 +1538,15 @@ impl Orch {
                     for s in &self.slots {
                         s.handle.stop();
                     }
+                    if let Some(h) = self.check_task.take() {
+                        h.abort();
+                        let _ = self.tx.send(Ev::CheckDone { ok: false, secs: 0 });
+                        if matches!(self.stage, Stage::Checking) {
+                            self.log(Level::Warn, "check stopped");
+                            self.idle();
+                        }
+                        self.check_gates = false;
+                    }
                 }
             },
             Cmd::Review => match self.stage {
@@ -1278,6 +1554,47 @@ impl Orch {
                 Stage::Building => self.review_after = true,
                 _ => {}
             },
+            Cmd::Check(arg) => {
+                let arg = arg.map(|a| a.trim().to_string()).filter(|a| !a.is_empty());
+                match arg.as_deref() {
+                    Some("off") | Some("none") => {
+                        self.cfg.check = None;
+                        let _ = self.tx.send(Ev::CheckSet(None));
+                        self.log(Level::Info, "check turned off");
+                    }
+                    Some(cmd) => {
+                        self.cfg.check = Some(cmd.to_string());
+                        let _ = self.tx.send(Ev::CheckSet(Some(cmd.to_string())));
+                    }
+                    None => {
+                        if self.cfg.check.is_none() {
+                            match self.suggested.clone() {
+                                Some(s) => {
+                                    self.cfg.check = Some(s.clone());
+                                    let _ = self.tx.send(Ev::CheckSet(Some(s)));
+                                }
+                                None => {
+                                    self.log(Level::Warn, "no check yet · /check <command>, e.g. /check cargo test");
+                                    return;
+                                }
+                            }
+                        }
+                    }
+                }
+                self.save();
+                // run it now if nothing else is going on
+                if let (Some(cmd), Stage::Idle) = (self.cfg.check.clone(), self.stage) {
+                    self.fix_attempts = 0;
+                    self.start_check(cmd, true);
+                }
+            }
+            Cmd::Run(cmd) => {
+                if self.check_task.is_some() {
+                    self.log(Level::Warn, "a command is already running");
+                    return;
+                }
+                self.start_check(cmd, false);
+            }
         }
     }
 
@@ -1287,8 +1604,9 @@ impl Orch {
             self.phase(Phase::Plan);
         }
         let lead = self.lead().clone();
+        let check = self.check_note_lead();
         let prompt = fill(
-            ROUTE_PROMPT,
+            if self.code() { CODE_ROUTE_PROMPT } else { ROUTE_PROMPT },
             &[
                 ("%TEXT%", text),
                 ("%DIR%", &self.dir_s()),
@@ -1296,6 +1614,7 @@ impl Orch {
                 ("%VIBE%", &self.vibe),
                 ("%ORDER%", &self.order()),
                 ("%TEAM%", &self.team()),
+                ("%CHECK%", &check),
                 ("%TOOLS%", tool_note(lead.provider)),
             ],
         );
@@ -1313,11 +1632,16 @@ impl Orch {
 pub async fn run(cfg: Config, tx: Tx, mut cmds: UnboundedReceiver<Cmd>) {
     let shared = Shared::default();
     let (notes_tx, mut notes) = unbounded_channel();
-    let preview = crate::server::start(cfg.dir.clone(), shared.version.clone()).await;
+    // code projects only get a preview once there's a page to show
+    let preview = if cfg.kind == Kind::Page || cfg.dir.join("index.html").exists() {
+        crate::server::start(cfg.dir.clone(), shared.version.clone()).await
+    } else {
+        None
+    };
     if let Some(url) = &preview {
         let _ = tx.send(Ev::Server(url.clone()));
     }
-    tokio::spawn(watch_files(cfg.dir.clone(), tx.clone(), shared.clone()));
+    tokio::spawn(watch_files(cfg.dir.clone(), tx.clone(), shared.clone(), cfg.kind));
     tokio::spawn(watch_outbox(cfg.dir.clone(), tx.clone(), shared.clone()));
 
     let mut o = Orch {
@@ -1336,7 +1660,20 @@ pub async fn run(cfg: Config, tx: Tx, mut cmds: UnboundedReceiver<Cmd>) {
         stopping: false,
         mail_seen: 0,
         preview,
+        suggested: None,
+        fix_attempts: 0,
+        check_task: None,
+        check_gates: false,
+        round_work: false,
     };
+    if let Some(c) = &cfg.check {
+        let _ = tx.send(Ev::CheckSet(Some(c.clone())));
+    } else if cfg.kind == Kind::Code {
+        // the project's own manifests usually say how to test it; still needs the user's ok
+        if let Some(d) = project::detect_check(&cfg.dir) {
+            o.suggest(d);
+        }
+    }
     match cfg.resume.clone() {
         Some(st) => {
             for a in &st.agents {

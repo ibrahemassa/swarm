@@ -15,6 +15,7 @@ use serde_json::{json, Value};
 
 use crate::fx::{self, dim, hsv, lerp};
 use crate::orchestrator::{self, codex_ready, home, name_word, tilde, State};
+use crate::project::{self, Kind};
 use crate::providers::{AgentSpec, Provider};
 use crate::ui::{bold, centered, put, shimmer, span, st, trunc, AMBER, CYAN, FAINT, GOLD, GREEN, MUTED, NEON, RED, SOFT, TEXT, WHITE};
 
@@ -39,6 +40,10 @@ pub struct Setup {
     pub open: Open,
     pub budget: f64,
     pub demo: bool,
+    pub kind: Kind,
+    /// Code mode: the command swarm runs after every round.
+    pub check: String,
+    check_edited: bool,
 }
 
 pub enum Choice {
@@ -49,6 +54,17 @@ pub enum Choice {
 
 const BUDGETS: &[f64] = &[0.0, 0.5, 1.0, 2.0, 3.0, 5.0, 10.0, 20.0, 50.0, 100.0];
 const MAX_PER_TYPE: usize = 8;
+
+const CODE_IDEAS: &[&str] = &[
+    "a CLI in Rust that converts CSV files to JSON, with streaming, column filters and tests",
+    "a Python library for parsing and validating IBANs, with a test suite",
+    "a terminal snake game in Python using curses, with a high-score file",
+    "a REST API in Node with Express for a todo list, SQLite storage and tests",
+    "a Go tool that watches a folder and mirrors changes to a backup directory, with tests",
+    "a browser-based pixel art editor in plain JS with export to PNG",
+    "a markdown-to-HTML static site generator in Python with templates and tests",
+    "a Rust library for rate limiting (token bucket and sliding window) with benchmarks",
+];
 
 const IDEAS: &[&str] = &[
     "landing page for a neon late-night ramen bar in Tokyo",
@@ -112,6 +128,14 @@ impl Setup {
             let t = if self.task.trim().is_empty() { "page" } else { self.task.trim() };
             self.dir = tilde(&orchestrator::default_dir(t));
         }
+        self.sync_check();
+    }
+
+    /// Code mode: offer the project's usual test command until the user types their own.
+    fn sync_check(&mut self) {
+        if self.kind == Kind::Code && !self.check_edited {
+            self.check = project::detect_check(&self.dir_path()).unwrap_or_default();
+        }
     }
 }
 
@@ -142,6 +166,9 @@ pub fn load_prefs() -> Setup {
         open: Open::End,
         budget: 0.0,
         demo: false,
+        kind: Kind::Page,
+        check: String::new(),
+        check_edited: false,
     };
     if let Some(v) = std::fs::read_to_string(config_dir().join("prefs.json")).ok().and_then(|t| serde_json::from_str::<Value>(&t).ok()) {
         if let Some(p) = v["lead"].as_str().and_then(Provider::parse) {
@@ -165,6 +192,7 @@ pub fn load_prefs() -> Setup {
             _ => Open::End,
         };
         s.budget = v["budget"].as_f64().unwrap_or(0.0);
+        s.kind = Kind::parse(v["kind"].as_str().unwrap_or("page"));
     }
     s.sync_dir();
     s
@@ -179,7 +207,7 @@ pub fn save_prefs(s: &Setup) {
     }
     let v = json!({
         "lead": s.lead.key(), "lead_model": s.lead_model, "counts": counts, "models": models,
-        "review": s.review, "budget": s.budget,
+        "review": s.review, "budget": s.budget, "kind": s.kind.key(),
         "open": match s.open { Open::Live => "live", Open::End => "end", Open::Never => "never" },
     });
     let _ = std::fs::create_dir_all(config_dir());
@@ -214,6 +242,7 @@ pub fn latest_project() -> Option<PathBuf> {
 
 struct Recent {
     dir: PathBuf,
+    kind: Kind,
     title: String,
     round: u32,
     agents: usize,
@@ -243,7 +272,7 @@ fn load_recent() -> Vec<Recent> {
             let st = State::load(&dir)?;
             let age = std::fs::metadata(State::path(&dir)).and_then(|m| m.modified()).map(ago).unwrap_or_default();
             let title = if st.title.is_empty() { st.task.clone() } else { st.title.clone() };
-            Some(Recent { title, round: st.round.saturating_sub(1), agents: st.agents.len(), age, dir })
+            Some(Recent { title, kind: st.kind, round: st.round.saturating_sub(1), agents: st.agents.len(), age, dir })
         })
         .take(6)
         .collect()
@@ -254,11 +283,13 @@ fn load_recent() -> Vec<Recent> {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Field {
     Task,
+    Kind,
     Dir,
     Lead,
     Team(usize),
     Review,
     Open,
+    Check,
     Budget,
     Mode,
     Launch,
@@ -282,6 +313,7 @@ impl Wizard {
     fn fields(&self) -> Vec<Field> {
         let mut v = vec![
             Field::Task,
+            Field::Kind,
             Field::Dir,
             Field::Lead,
             Field::Team(0),
@@ -289,10 +321,11 @@ impl Wizard {
             Field::Team(2),
             Field::Review,
             Field::Open,
-            Field::Budget,
-            Field::Mode,
-            Field::Launch,
         ];
+        if self.s.kind == Kind::Code {
+            v.push(Field::Check);
+        }
+        v.extend([Field::Budget, Field::Mode, Field::Launch]);
         v.extend((0..self.recent.len()).map(Field::Recent));
         v
     }
@@ -306,7 +339,28 @@ impl Wizard {
         match self.field() {
             Field::Task => Some(&mut self.s.task),
             Field::Dir => Some(&mut self.s.dir),
+            Field::Check => Some(&mut self.s.check),
             _ => None,
+        }
+    }
+
+    fn ideas(&self) -> &'static [&'static str] {
+        match self.s.kind {
+            Kind::Page => IDEAS,
+            Kind::Code => CODE_IDEAS,
+        }
+    }
+
+    /// A text field changed: keep the folder and check suggestions in step.
+    fn edited(&mut self, f: Field) {
+        match f {
+            Field::Task => self.s.sync_dir(),
+            Field::Dir => {
+                self.s.dir_edited = true;
+                self.s.sync_check();
+            }
+            Field::Check => self.s.check_edited = true,
+            _ => {}
         }
     }
 
@@ -316,6 +370,7 @@ impl Wizard {
         self.cursor = match self.field() {
             Field::Task => self.s.task.chars().count(),
             Field::Dir => self.s.dir.chars().count(),
+            Field::Check => self.s.check.chars().count(),
             _ => 0,
         };
     }
@@ -387,6 +442,10 @@ impl Wizard {
                 s.budget = BUDGETS[(k + d).clamp(0, BUDGETS.len() as i32 - 1) as usize];
             }
             Field::Mode => s.demo = !s.demo,
+            Field::Kind => {
+                s.kind = if s.kind == Kind::Page { Kind::Code } else { Kind::Page };
+                s.sync_check();
+            }
             _ => {}
         }
     }
@@ -413,24 +472,20 @@ impl Wizard {
 
     fn insert(&mut self, t: &str) {
         let c = self.cursor;
-        let is_task = self.field() == Field::Task;
+        let f = self.field();
         let Some(s) = self.text() else { return };
         let t: String = t.chars().map(|c| if c.is_control() { ' ' } else { c }).collect();
         let b = Self::byte(s, c);
         s.insert_str(b, &t);
         self.cursor += t.chars().count();
-        if is_task {
-            self.s.sync_dir();
-        } else {
-            self.s.dir_edited = true;
-        }
+        self.edited(f);
     }
 
     /// Returns Some when the launcher is done.
     fn key(&mut self, k: KeyEvent) -> Option<Choice> {
         let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
         let f = self.field();
-        let is_text = matches!(f, Field::Task | Field::Dir);
+        let is_text = matches!(f, Field::Task | Field::Dir | Field::Check);
         match (k.code, ctrl) {
             (KeyCode::Char('c'), true) | (KeyCode::Char('q'), true) | (KeyCode::Esc, _) => return Some(Choice::Quit),
             (KeyCode::Char('g'), true) | (KeyCode::F(5), _) => {
@@ -439,8 +494,9 @@ impl Wizard {
                 }
             }
             (KeyCode::Char('r'), true) => {
-                self.idea = (self.idea + 1 + (self.frame as usize % 3)) % IDEAS.len();
-                self.s.task = IDEAS[self.idea].to_string();
+                let ideas = self.ideas();
+                self.idea = (self.idea + 1 + (self.frame as usize % 3)) % ideas.len();
+                self.s.task = ideas[self.idea].to_string();
                 self.s.sync_dir();
                 self.focus = 0;
                 self.cursor = self.s.task.chars().count();
@@ -450,9 +506,7 @@ impl Wizard {
                     s.clear();
                 }
                 self.cursor = 0;
-                if f == Field::Task {
-                    self.s.sync_dir();
-                }
+                self.edited(f);
             }
             (KeyCode::Up, _) | (KeyCode::BackTab, _) => self.move_focus(-1),
             (KeyCode::Down, _) | (KeyCode::Tab, _) => self.move_focus(1),
@@ -463,7 +517,7 @@ impl Wizard {
                     }
                 }
                 Field::Recent(i) => return Some(Choice::Resume(self.recent[i].dir.clone())),
-                Field::Review | Field::Mode => self.change(1),
+                Field::Review | Field::Mode | Field::Kind => self.change(1),
                 _ => self.move_focus(1),
             },
             (KeyCode::Left, _) if is_text => self.cursor = self.cursor.saturating_sub(1),
@@ -483,11 +537,7 @@ impl Wizard {
                         let b = Self::byte(s, c);
                         s.remove(b);
                     }
-                    if f == Field::Task {
-                        self.s.sync_dir();
-                    } else {
-                        self.s.dir_edited = true;
-                    }
+                    self.edited(f);
                 }
             }
             (KeyCode::Delete, _) if is_text => {
@@ -498,6 +548,7 @@ impl Wizard {
                         s.remove(b);
                     }
                 }
+                self.edited(f);
             }
             (KeyCode::Char(' '), false) if !is_text => match f {
                 Field::Lead | Field::Team(_) => self.cycle_model(1),
@@ -587,7 +638,7 @@ fn draw(f: &mut Frame, w: &Wizard) {
     let big = area.height >= 38 && area.width >= 72;
     let head_h = if big { 9 } else { 2 };
     // the form is ~32 rows; don't stretch it down an empty tall terminal
-    let body_h = area.height.saturating_sub(head_h + 2).min(30);
+    let body_h = area.height.saturating_sub(head_h + 2).min(34);
     let [head, body, foot, _] =
         Layout::vertical([Constraint::Length(head_h), Constraint::Length(body_h), Constraint::Length(2), Constraint::Min(0)]).areas(area);
 
@@ -664,7 +715,7 @@ fn draw_head(f: &mut Frame, w: &Wizard, area: Rect, big: bool, t: f32) {
             }
         }
     }
-    let sub = "multi-agent web forge  ·  claude × codex × antigravity  ·  what are we building?";
+    let sub = "multi-agent dev forge  ·  claude × codex × antigravity  ·  what are we building?";
     let shown = ((t - 0.4).max(0.0) * 80.0) as usize;
     centered(buf, area, y0 + 7, &Line::from(span(sub.chars().take(shown).collect::<String>(), MUTED)));
 }
@@ -746,13 +797,33 @@ fn draw_form(f: &mut Frame, w: &Wizard, area: Rect, t: f32) {
     let vw = width.saturating_sub(LABEL_W + 2);
 
     // 01 WHAT
-    lines.push(section("WHAT", "01", width, matches!(field, Field::Task), t));
-    let task = text_field(&w.s.task, w.cursor, focused(Field::Task), vw, "describe the page… (ctrl-r for an idea)", w.frame);
+    let code = w.s.kind == Kind::Code;
+    lines.push(section("WHAT", "01", width, matches!(field, Field::Task | Field::Kind), t));
+    let hint =
+        if code { "describe the project or the change… (ctrl-r for an idea)" } else { "describe the page… (ctrl-r for an idea)" };
+    let task = text_field(&w.s.task, w.cursor, focused(Field::Task), vw, hint, w.frame);
     for (k, l) in task.into_iter().take(3).enumerate() {
-        let label = if k == 0 { "build me" } else { "" };
+        let label = if k > 0 {
+            ""
+        } else if code {
+            "the job"
+        } else {
+            "build me"
+        };
         let mut r = row(label, focused(Field::Task), t, Vec::new());
         r.spans.extend(l.spans);
         lines.push(r);
+    }
+    {
+        let fo = focused(Field::Kind);
+        let (chip_s, desc) = if code {
+            (chip(" CODE PROJECT ", Color::Black, CYAN), "an app, CLI, library or game, new or an existing repo")
+        } else {
+            (chip(" WEB PAGE ", Color::Black, GOLD), "one static page, built section by section")
+        };
+        let mut v = arrows(fo, vec![chip_s]);
+        v.push(span(format!("  {desc}"), MUTED));
+        lines.push(row("type", fo, t, v));
     }
     lines.push(Line::default());
 
@@ -765,6 +836,8 @@ fn draw_form(f: &mut Frame, w: &Wizard, area: Rect, t: f32) {
     let has_project = !w.s.dir.trim().is_empty() && State::path(&w.s.dir_path()).exists();
     if has_project {
         lines.push(row("", false, t, vec![span("⚠ already a swarm project · launching starts it over · resume it from RECENT", AMBER)]));
+    } else if code {
+        lines.push(row("", false, t, vec![span(project::describe(&w.s.dir_path()), MUTED)]));
     } else if w.s.dir_path().exists() {
         lines.push(row("", false, t, vec![span("folder exists · the swarm adds its files to it", MUTED)]));
     } else {
@@ -813,16 +886,35 @@ fn draw_form(f: &mut Frame, w: &Wizard, area: Rect, t: f32) {
     lines.push(Line::default());
 
     // 04 HOW
-    lines.push(section("HOW", "04", width, matches!(field, Field::Review | Field::Open | Field::Mode), t));
+    lines.push(section("HOW", "04", width, matches!(field, Field::Review | Field::Open | Field::Mode | Field::Check), t));
     {
         let fo = focused(Field::Review);
         let (mark, c) = if w.s.review { ("[✔]", GREEN) } else { ("[ ]", FAINT) };
-        lines.push(row("review pass", fo, t, vec![bold(mark, c), span(" lead checks the whole page after each build", MUTED)]));
+        let what = if code { " lead checks that the pieces fit after each build" } else { " lead checks the whole page after each build" };
+        lines.push(row("review pass", fo, t, vec![bold(mark, c), span(what, MUTED)]));
+        if code {
+            let fo = focused(Field::Check);
+            let line =
+                text_field(&w.s.check, w.cursor, fo, vw, "no check · e.g. cargo test, npm test, python3 -m pytest -q", w.frame).remove(0);
+            let mut r = row("check", fo, t, Vec::new());
+            r.spans.extend(line.spans);
+            lines.push(r);
+            let note = if w.s.check.trim().is_empty() {
+                "the lead suggests one · nothing runs until you /check it"
+            } else if w.s.check_edited {
+                "runs after each round · failures go back to the team (3 fix rounds max)"
+            } else {
+                "detected · runs after each round, failures go back to the team"
+            };
+            lines.push(row("", false, t, vec![span(note, FAINT)]));
+        }
         let fo = focused(Field::Open);
-        let (label, desc) = match w.s.open {
-            Open::Live => ("live", "open the preview as it builds"),
-            Open::End => ("when done", "open the page once it ships"),
-            Open::Never => ("never", "you open it with ctrl-o"),
+        let (label, desc) = match (w.s.open, code) {
+            (Open::Never, _) => ("never", "you open it with ctrl-o"),
+            (Open::Live, false) => ("live", "open the preview as it builds"),
+            (Open::End, false) => ("when done", "open the page once it ships"),
+            (Open::Live, true) => ("live", "open the preview while it builds, if it's a web app"),
+            (Open::End, true) => ("when done", "open the preview when it ships, if it's a web app"),
         };
         let mut v = arrows(fo, vec![bold(format!("{label:<9}"), CYAN)]);
         v.push(span(format!("  {desc}"), MUTED));
@@ -833,7 +925,12 @@ fn draw_form(f: &mut Frame, w: &Wizard, area: Rect, t: f32) {
         } else {
             arrows(fo, vec![chip(" REAL ", Color::Black, GREEN)])
         };
-        v.push(span(if w.s.demo { "  scripted agents build a sample page, zero tokens" } else { "  real agents, real tokens" }, MUTED));
+        let desc = match (w.s.demo, code) {
+            (true, true) => "  the demo always builds its sample web page, zero tokens",
+            (true, false) => "  scripted agents build a sample page, zero tokens",
+            _ => "  real agents, real tokens",
+        };
+        v.push(span(desc, MUTED));
         lines.push(row("mode", fo, t, v));
     }
     lines.push(Line::default());
@@ -964,7 +1061,8 @@ fn draw_side(f: &mut Frame, w: &Wizard, area: Rect, t: f32) {
             span(
                 trunc(
                     &format!(
-                        "{} · {} agents · {} round{} · {}",
+                        "{} · {} · {} agents · {} round{} · {}",
+                        r.kind.key(),
                         tilde(&r.dir),
                         r.agents,
                         r.round,

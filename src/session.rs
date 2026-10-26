@@ -24,6 +24,8 @@ pub enum Note {
     Turn(usize, Result<String, String>),
     Session(usize, String),
     Cost(usize, f64),
+    /// The check command finished: passed, and the tail of its output.
+    Check(bool, String),
 }
 
 #[derive(Clone)]

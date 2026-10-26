@@ -635,6 +635,9 @@ impl Demo {
                     }
                 }
             }
+            Cmd::Check(_) | Cmd::Run(_) => {
+                let _ = self.tx.send(Ev::Log(Level::Warn, "demo mode doesn't run commands".into()));
+            }
             Cmd::Review => {
                 if !self.in_round {
                     self.review().await;
@@ -654,7 +657,7 @@ pub async fn run(cfg: Config, tx: Tx, mut cmds: UnboundedReceiver<Cmd>) {
     if let Some(u) = &url {
         let _ = tx.send(Ev::Server(u.clone()));
     }
-    tokio::spawn(orchestrator::watch_files(cfg.dir.clone(), tx.clone(), shared.clone()));
+    tokio::spawn(orchestrator::watch_files(cfg.dir.clone(), tx.clone(), shared.clone(), crate::project::Kind::Page));
     sleep(ms(2200.0)).await; // let the boot sequence breathe
 
     let mut rng = Rng::seeded();
@@ -685,7 +688,12 @@ pub async fn run(cfg: Config, tx: Tx, mut cmds: UnboundedReceiver<Cmd>) {
     let items: Vec<PlanItem> = picks
         .iter()
         .zip(&workers)
-        .map(|((k, id), (_, name))| PlanItem { id: id.clone(), agent: name.clone(), brief: SECTIONS[*k].brief.to_string() })
+        .map(|((k, id), (_, name))| PlanItem {
+            id: id.clone(),
+            agent: name.clone(),
+            brief: SECTIONS[*k].brief.to_string(),
+            owns: Vec::new(),
+        })
         .collect();
     let page = Page { title: TITLE.into(), ids: items.iter().map(|i| i.id.clone()).collect(), placeholders: true };
     *shared.page.lock().unwrap() = Some(page.clone());
